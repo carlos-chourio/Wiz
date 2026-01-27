@@ -1,0 +1,315 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Threading.Tasks;
+using WiZ;
+
+namespace WiZ.Console
+{
+    class Program
+    {
+        private const string TestBulbConfigFile = "test_bulb_config.json";
+        
+        static async Task Main(string[] args)
+        {
+            System.Console.WriteLine("=== WiZ Bulb Testing Console ===");
+            System.Console.WriteLine();
+
+            try
+            {
+                var testBulbConfig = LoadTestBulbConfig();
+                Bulb? testBulb = null;
+                
+                if (testBulbConfig == null)
+                {
+                    System.Console.WriteLine("No test bulb configured. Starting discovery...");
+                    testBulb = await DiscoverAndSelectBulb();
+                    
+                    if (testBulb != null)
+                    {
+                        await SaveTestBulbConfig(testBulb);
+                        System.Console.WriteLine($"Test bulb saved: {testBulb.MACAddress}");
+                    }
+                    else
+                    {
+                        System.Console.WriteLine("No bulbs found. Exiting.");
+                        return;
+                    }
+                }
+                else
+                {
+                    System.Console.WriteLine($"Using saved test bulb: {testBulbConfig.MacAddress}");
+                    testBulb = await Bulb.GetBulbByMacAddress(testBulbConfig.MacAddress, ScanCondition.NotFound);
+                    if (testBulb == null)
+                    {
+                        System.Console.WriteLine("Failed to connect to saved bulb. Running discovery...");
+                        testBulb = await DiscoverAndSelectBulb();
+                        if (testBulb == null)
+                        {
+                            System.Console.WriteLine("No bulbs found. Exiting.");
+                            return;
+                        }
+                    }
+                }
+
+                await TestBulbInteractions(testBulb);
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Error: {ex.Message}");
+                System.Console.WriteLine($"Stack trace: {ex.StackTrace}");
+            }
+
+            System.Console.WriteLine("\nPress any key to exit...");
+            System.Console.ReadKey();
+        }
+
+        private static async Task<Bulb?> DiscoverAndSelectBulb()
+        {
+            System.Console.WriteLine("Discovering WiZ bulbs on your network...");
+            System.Console.WriteLine("This will scan for 10 seconds. Please wait...");
+            System.Console.WriteLine();
+
+            var discoveredBulbs = new List<Bulb>();
+            
+            var localAddr = WiZ.NetworkHelper.DefaultLocalIP;
+            var macAddr = WiZ.NetworkHelper.DefaultLocalMAC;
+
+            await Bulb.ScanForBulbs(
+                localAddr,
+                macAddr,
+                WiZ.ScanMode.GetSystemConfig,
+                10000,
+                (bulb) =>
+                {
+                    discoveredBulbs.Add(bulb);
+                    System.Console.WriteLine($"Found: {bulb.MACAddress} - {bulb.IPAddress} - {bulb.BulbType}");
+                });
+
+            System.Console.WriteLine();
+            System.Console.WriteLine($"Discovery complete. Found {discoveredBulbs.Count} bulb(s).");
+
+            if (discoveredBulbs.Count == 0)
+            {
+                return null;
+            }
+            else if (discoveredBulbs.Count == 1)
+            {
+                System.Console.WriteLine("Auto-selecting the only bulb found.");
+                return discoveredBulbs.First();
+            }
+            else
+            {
+                System.Console.WriteLine("Multiple bulbs found. Please select one:");
+                for (int i = 0; i < discoveredBulbs.Count; i++)
+                {
+                    var bulb = discoveredBulbs[i];
+                    System.Console.WriteLine($"{i + 1}. {bulb.MACAddress} - {bulb.IPAddress} - {bulb.BulbType}");
+                }
+
+                System.Console.Write("Enter bulb number (or press Enter for first bulb): ");
+                var input = System.Console.ReadLine();
+                
+                if (int.TryParse(input, out int selection) && selection > 0 && selection <= discoveredBulbs.Count)
+                {
+                    return discoveredBulbs[selection - 1];
+                }
+                
+                return discoveredBulbs.First();
+            }
+        }
+
+        private static async Task TestBulbInteractions(Bulb bulb)
+        {
+            System.Console.WriteLine("\n=== Testing Bulb Interactions ===");
+            System.Console.WriteLine($"Bulb: {bulb.MACAddress} - {bulb.IPAddress}");
+            System.Console.WriteLine();
+
+            // Test connection by getting pilot (current state)
+            System.Console.WriteLine("Testing connection and getting current state...");
+            try
+            {
+                await bulb.GetPilot();
+                System.Console.WriteLine($"Connection successful!");
+                System.Console.WriteLine($"Current state: {(bulb.IsPoweredOn == true ? "ON" : "OFF")}");
+                System.Console.WriteLine($"Brightness: {bulb.Settings?.Brightness ?? 0}%");
+                System.Console.WriteLine($"Scene ID: {bulb.Settings?.Scene ?? 0}");
+                System.Console.WriteLine($"Temperature: {bulb.Settings?.Temperature ?? 0}K");
+                System.Console.WriteLine($"RGB: R={bulb.Settings?.Red ?? 0}, G={bulb.Settings?.Green ?? 0}, B={bulb.Settings?.Blue ?? 0}");
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Failed to get bulb state: {ex.Message}");
+                return;
+            }
+
+            System.Console.WriteLine();
+
+            // Test basic controls
+            await TestBasicControls(bulb);
+
+            // Test state caching
+            await TestStateCaching(bulb);
+
+            // Test UDP issues
+            await TestUdpBehavior(bulb);
+        }
+
+        private static async Task TestBasicControls(Bulb bulb)
+        {
+            System.Console.WriteLine("=== Testing Basic Controls ===");
+            
+            try
+            {
+                // Test turning on
+                System.Console.WriteLine("Turning bulb ON...");
+                await bulb.TurnOn();
+                await Task.Delay(2000); // Wait for state to update
+                
+                // Test brightness
+                System.Console.WriteLine("Setting brightness to 50%...");
+                bulb.Brightness = 50;
+                await Task.Delay(2000);
+                
+                // Test turning off
+                System.Console.WriteLine("Turning bulb OFF...");
+                await bulb.TurnOff(); ;
+                await Task.Delay(2000);
+                
+                System.Console.WriteLine("Basic controls test completed successfully!");
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Error in basic controls test: {ex.Message}");
+            }
+            
+            System.Console.WriteLine();
+        }
+
+        private static async Task TestStateCaching(Bulb bulb)
+        {
+            System.Console.WriteLine("=== Testing State Caching ===");
+            
+            try
+            {
+                // Turn on and check if state is cached correctly
+                bulb.IsPoweredOn = true;
+                await Task.Delay(1000);
+                
+                var initialState = bulb.IsPoweredOn;
+                System.Console.WriteLine($"State after turning ON: {initialState}");
+                
+                // Get pilot again to test cache
+                await bulb.GetPilot();
+                var refreshedState = bulb.IsPoweredOn;
+                System.Console.WriteLine($"State after refresh: {refreshedState}");
+                
+                if (initialState == refreshedState && refreshedState == true)
+                {
+                    System.Console.WriteLine("✓ State caching is working correctly");
+                }
+                else
+                {
+                    System.Console.WriteLine("✗ State caching issue detected!");
+                    System.Console.WriteLine($"Expected: true, Got: {refreshedState}");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Error in state caching test: {ex.Message}");
+            }
+            
+            System.Console.WriteLine();
+        }
+
+        private static async Task TestUdpBehavior(Bulb bulb)
+        {
+            System.Console.WriteLine("=== Testing UDP Behavior (Simulating Debug Scenario) ===");
+            
+            try
+            {
+                // Simulate multiple rapid calls that might trigger the UDP port binding issue
+                System.Console.WriteLine("Testing multiple rapid commands (simulating breakpoint scenario)...");
+                
+                var tasks = new List<Task>();
+                for (int i = 0; i < 5; i++)
+                {
+                    int taskNum = i;
+                    tasks.Add(Task.Run(async () =>
+                    {
+                        try
+                        {
+                            System.Console.WriteLine($"Task {taskNum}: Getting state...");
+                            await bulb.GetPilot();
+                            System.Console.WriteLine($"Task {taskNum}: Success");
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Console.WriteLine($"Task {taskNum}: Failed - {ex.Message}");
+                        }
+                    }));
+                    
+                    await Task.Delay(100); // Small delay to simulate breakpoint scenario
+                }
+                
+                await Task.WhenAll(tasks);
+                System.Console.WriteLine("UDP behavior test completed!");
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Error in UDP behavior test: {ex.Message}");
+            }
+            
+            System.Console.WriteLine();
+        }
+
+        private static TestBulbConfig? LoadTestBulbConfig()
+        {
+            try
+            {
+                if (File.Exists(TestBulbConfigFile))
+                {
+                    var json = File.ReadAllText(TestBulbConfigFile);
+                    return Newtonsoft.Json.JsonConvert.DeserializeObject<TestBulbConfig>(json);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Warning: Could not load test bulb config: {ex.Message}");
+            }
+            
+            return null;
+        }
+
+        private static async Task SaveTestBulbConfig(Bulb bulb)
+        {
+            try
+            {
+                var config = new TestBulbConfig
+                {
+                    MacAddress = bulb.MACAddress.ToString(),
+                    IPAddress = bulb.IPAddress.ToString(),
+                    ModelName = bulb.BulbType,
+                    LastSeen = DateTime.Now
+                };
+
+                var json = Newtonsoft.Json.JsonConvert.SerializeObject(config, Newtonsoft.Json.Formatting.Indented);
+                await File.WriteAllTextAsync(TestBulbConfigFile, json);
+            }
+            catch (Exception ex)
+            {
+                System.Console.WriteLine($"Warning: Could not save test bulb config: {ex.Message}");
+            }
+        }
+    }
+
+    public class TestBulbConfig
+    {
+        public string MacAddress { get; set; } = string.Empty;
+        public string IPAddress { get; set; } = string.Empty;
+        public string ModelName { get; set; } = string.Empty;
+        public DateTime LastSeen { get; set; }
+    }
+}
