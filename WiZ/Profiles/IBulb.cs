@@ -7,6 +7,8 @@ using System.Net.NetworkInformation;
 using System.Net;
 using Newtonsoft.Json;
 
+using WiZ.Models;
+
 namespace WiZ.Profiles
 {
     public interface IBulb
@@ -48,10 +50,10 @@ namespace WiZ.Profiles
         string Icon { get; set; }
 
         /// <summary>
-        /// Get a <see cref="Bulb"/> object from this interface.
+        /// Get a <see cref="BulbModel"/> object from this interface.
         /// </summary>
         /// <returns></returns>
-        Task<Bulb> GetBulb();
+        Task<BulbModel> GetBulbModel();
 
     }
 

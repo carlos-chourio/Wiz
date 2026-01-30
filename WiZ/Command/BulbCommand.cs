@@ -1,172 +1,171 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.Diagnostics.CodeAnalysis;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
 using Newtonsoft.Json;
-
+using WiZ.Models;
 using WiZ.Observable;
 using WiZ.Profiles;
 
 namespace WiZ
 {
     /// <summary>
-    /// Bulb command structure root object.
+    /// Root object for the WiZ UDP command protocol.
+    /// Encapsulates the method, parameters, and results of a bulb interaction.
     /// </summary>
     public sealed class BulbCommand : ObservableBase
     {
+        #region Private Fields
+        private string _environment;
+        private BulbMethod _method = BulbMethod.GetPilot;
+        private BulbParams _params;
+        private BulbParams _result;
+        #endregion
 
-        #region Internal Fields
+        #region JSON Serialization Settings
+        /// <summary>
+        /// Static collection of converters used for WiZ protocol serialization.
+        /// </summary>
+        private static List<JsonConverter> GetConverters() => new List<JsonConverter>
+        {
+            new TupleConverter(),
+            new MACAddressConverter(),
+            new ODJsonConverter<MACAddress, BulbModel>(nameof(BulbModel.MACAddress)),
+            new ODJsonConverter<int, Room>(nameof(Room.RoomId)),
+            new ODJsonConverter<int, Home>(nameof(Home.HomeId)),
+            new ODJsonConverter<Guid, Scene>(nameof(Scene.SceneId)),
+            new BulbMethodJsonConverter(),
+            new IPAddressConverter()
+        };
 
-        internal static List<JsonConverter> JsonConverters { get; } = new List<JsonConverter>(
-            new JsonConverter[] 
-            { 
-                new TupleConverter(), 
-                new MACAddressConverter(),
-                new ODJsonConverter<MACAddress, Bulb>(nameof(Bulb.MACAddress)),
-                new ODJsonConverter<int, Room>(nameof(Room.RoomId)),
-                new ODJsonConverter<int, Home>(nameof(Home.HomeId)),
-                new ODJsonConverter<Guid, Scene>(nameof(Scene.SceneId)),
-                new BulbMethodJsonConverter(), 
-                new IPAddressConverter() 
-            });
-
-        internal static readonly JsonSerializerSettings DefaultJsonSettings = new JsonSerializerSettings()
+        /// <summary>
+        /// Standard JSON settings for bulb communication.
+        /// </summary>
+        public static JsonSerializerSettings DefaultJsonSettings { get; } = new JsonSerializerSettings
         {
             ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor,
             NullValueHandling = NullValueHandling.Ignore,
-            Converters = JsonConverters
+            Converters = GetConverters()
         };
 
-        internal static readonly JsonSerializerSettings DefaultProjectJsonSettings = new JsonSerializerSettings()
+        /// <summary>
+        /// Indented JSON settings for profile persistence and debugging.
+        /// </summary>
+        public static JsonSerializerSettings DefaultProjectJsonSettings { get; } = new JsonSerializerSettings
         {
             ConstructorHandling = ConstructorHandling.AllowNonPublicDefaultConstructor,
             Formatting = Formatting.Indented,
             NullValueHandling = NullValueHandling.Ignore,
-            Converters = JsonConverters
+            Converters = GetConverters()
         };
+        #endregion
 
-        #endregion Internal Fields
-
-        #region Private Fields
-
-        private string env;
-        private BulbParams inparam;
-        private BulbMethod method = BulbMethod.GetPilot;
-
-        private BulbParams outparam;
-
-        #endregion Private Fields
-
-        #region Public Constructors
-
+        #region Constructors
         /// <summary>
-        /// Create a new, blank instance.
+        /// Initializes a new instance of the <see cref="BulbCommand"/> class with default parameters.
         /// </summary>
         public BulbCommand()
         {
-            Params = new BulbParams();
+            _params = new BulbParams();
         }
 
         /// <summary>
-        /// Create a new instance initialized to the specified <see cref="BulbMethod"/>.
+        /// Initializes a new instance of the <see cref="BulbCommand"/> class with a specific <see cref="BulbMethod"/>.
         /// </summary>
-        /// <param name="mtd"></param>
-        public BulbCommand(BulbMethod mtd)
+        /// <param name="method">The method to execute.</param>
+        public BulbCommand(BulbMethod method) : this()
         {
-            Method = mtd;
-            Params = new BulbParams();
+            _method = method;
         }
 
         /// <summary>
-        /// Create a new instance initialzed with a JSON string object.
+        /// Initializes a new instance of the <see cref="BulbCommand"/> class by parsing a JSON string.
         /// </summary>
-        /// <param name="json"></param>
+        /// <param name="json">The JSON command string.</param>
         public BulbCommand(string json)
         {
             try
             {
-                JsonConvert.PopulateObject(json, this, DefaultJsonSettings);
+                if (!string.IsNullOrWhiteSpace(json))
+                {
+                    JsonConvert.PopulateObject(json, this, DefaultJsonSettings);
+                }
             }
-            catch
+            catch (Exception ex)
             {
-
+                Serilog.Log.Error(ex, "Failed to populate BulbCommand from JSON: {Json}", json);
             }
         }
+        #endregion
 
-        #endregion Public Constructors
-
-        #region Public Properties
-
+        #region Properties
         /// <summary>
-        /// Environment.
+        /// Optional environment identifier.
         /// </summary>
         [JsonProperty("env")]
         public string Environment
         {
-            get => env;
-            set
-            {
-                SetProperty(ref env, value);
-            }
+            get => _environment;
+            set => SetProperty(ref _environment, value);
         }
 
         /// <summary>
-        /// The <see cref="BulbMethod"/> of this instance.
+        /// The WiZ method (e.g., getPilot, setPilot, etc.).
         /// </summary>
         [JsonProperty("method")]
         public BulbMethod Method
         {
-            get => method;
-            set
-            {
-                SetProperty(ref method, value);
-            }
+            get => _method;
+            set => SetProperty(ref _method, value);
         }
 
         /// <summary>
-        /// Outbound paramters.
+        /// The input parameters for the command.
         /// </summary>
         [JsonProperty("params")]
         public BulbParams Params
         {
-            get => outparam;
-            set
-            {
-                SetProperty(ref outparam, value);
-            }
+            get => _params;
+            set => SetProperty(ref _params, value);
         }
 
         /// <summary>
-        /// Inbound results.
+        /// The result returned by the bulb after execution.
         /// </summary>
         [JsonProperty("result")]
         public BulbParams Result
         {
-            get => inparam;
-            set
-            {
-                SetProperty(ref inparam, value);
-            }
+            get => _result;
+            set => SetProperty(ref _result, value);
         }
-
-        #endregion Public Properties
+        #endregion
 
         #region Public Methods
+        /// <summary>
+        /// Assembles the command into a JSON string suitable for sending over UDP.
+        /// </summary>
+        /// <returns>A JSON string representing the command.</returns>
+        public string AssembleCommand() => JsonConvert.SerializeObject(this, DefaultJsonSettings);
 
         /// <summary>
-        /// Assemble and return the JSON string for this command.
+        /// Returns a formatted JSON string representing the current state of the command.
         /// </summary>
-        /// <returns></returns>
-        public string AssembleCommand()
-        {
-            return JsonConvert.SerializeObject(this, DefaultJsonSettings);
-        }
+        public override string ToString() => JsonConvert.SerializeObject(this, DefaultProjectJsonSettings);
+        #endregion
 
-        #endregion Public Methods
+        #region Factory Methods
+        /// <summary>
+        /// Creates a GetPilot command.
+        /// </summary>
+        public static BulbCommand GetPilot() => new BulbCommand(BulbMethod.GetPilot);
+
+        /// <summary>
+        /// Creates a SetPilot command with the given settings.
+        /// </summary>
+        public static BulbCommand SetPilot(BulbParams settings) => new BulbCommand(BulbMethod.SetPilot) { Params = settings };
+
+        /// <summary>
+        /// Creates a GetSystemConfig command.
+        /// </summary>
+        public static BulbCommand GetSystemConfig() => new BulbCommand(BulbMethod.GetSystemConfig);
+        #endregion
     }
-
 }

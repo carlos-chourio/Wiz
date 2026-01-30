@@ -10,6 +10,7 @@ using System.Reflection;
 
 using Newtonsoft.Json;
 using System.Collections;
+using WiZ.Models;
 using WiZ.Observable;
 
 namespace WiZ.Profiles
@@ -80,7 +81,7 @@ namespace WiZ.Profiles
             return l;
 
         }
-        public static ObservableDictionary<int, Home> GenerateHomes(IEnumerable<Bulb> bulbs)
+        public static ObservableDictionary<int, Home> GenerateHomes(IEnumerable<BulbModel> bulbs)
         {
             Room nr;
             Home nh;

@@ -64,7 +64,7 @@ namespace WiZ.Profiles
 
             foreach (var bulb in p.Bulbs)
             {
-                bulb.GetBulb().Wait();
+                bulb.GetBulbModel().Wait();
             }
 
             foreach (var home in p.Homes)
@@ -73,7 +73,7 @@ namespace WiZ.Profiles
                 {
                     foreach (var bulb in room.Bulbs)
                     {
-                        bulb.GetBulb().Wait();
+                        bulb.GetBulbModel().Wait();
                     }
                 }
             }
@@ -90,7 +90,7 @@ namespace WiZ.Profiles
 
             foreach (var bulb in obj.Bulbs)
             {
-                bulb.GetBulb().Wait();
+                bulb.GetBulbModel().Wait();
             }
         }
 

@@ -8,7 +8,9 @@ using System.Threading.Tasks;
 
 using Newtonsoft.Json;
 
+using WiZ.Models;
 using WiZ.Observable;
+using WiZ.Services;
 
 namespace WiZ.Profiles
 {
@@ -49,51 +51,48 @@ namespace WiZ.Profiles
             };
         }
 
-        public static async Task<IList<Bulb>> CreateBulbsFromInterfaceList(IEnumerable<IBulb> source)
+        public static async Task<IList<BulbModel>> CreateBulbsFromInterfaceList(IEnumerable<IBulb> source)
         {
-            var l = new List<Bulb>();
+            var l = new List<BulbModel>();
 
             foreach (var b in source)
             {
-                l.Add(await b.GetBulb());
+                l.Add(await b.GetBulbModel());
             }
 
             return l;
         }
 
-        public async Task<Bulb> GetBulb()
+        public async Task<BulbModel> GetBulbModel()
         {
-            return await GetBulb(ScanCondition.Never);
-        }
+            BulbModel b;
 
-        public async Task<Bulb> GetBulb(ScanCondition sc)
-        {
-            Bulb b;
-
-            if (Bulb.BulbCache.ContainsKey(MACAddress))
+            lock (BulbService.BulbCache)
             {
+                if (BulbService.BulbCache.ContainsKey(MACAddress))
+                {
+                    b = BulbService.BulbCache[MACAddress];
 
-                b = Bulb.BulbCache[MACAddress];
+                    b.Name = Name;
+                    b.Icon = Icon;
+                    b.Settings.HomeId = HomeId;
+                    b.Settings.RoomId = RoomId;
 
-                b.Name = Name;
-                b.Icon = Icon;
-                b.HomeId = HomeId;
-                b.RoomId = RoomId;
-
-                return b;
+                    return b;
+                }
             }
 
-            b = await Bulb.GetBulbByMacAddress(MACAddress, sc);
-
-            if (b == null)
+            // Since we are moving away from Bulb.GetBulbByMacAddress, 
+            // and we want to use BulbService, we just create a new model if not in cache.
+            // In a real scenario, we might want to trigger a discovery or a specific GetPilot.
+            b = new BulbModel(IPAddress, Port)
             {
-                b = new Bulb(IPAddress, Port);
-            }
-
-            b.Name = Name;
-            b.Icon = Icon;
-            b.HomeId = HomeId;
-            b.RoomId = RoomId;
+                MACAddress = MACAddress,
+                Name = Name,
+                Icon = Icon
+            };
+            b.Settings.HomeId = HomeId;
+            b.Settings.RoomId = RoomId;
 
             return b;
         }
