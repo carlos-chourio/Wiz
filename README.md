@@ -2,7 +2,7 @@
 A modern .NET Standard 2.0 library for controlling WiZ Smart Bulbs
 
 > [!IMPORTANT]
-> **Fork Information**: This project is a refactored fork of the original [WizLib](https://github.com/OriginalAuthorLink). It has been modernized and restructured to improve maintainability, separation of concerns, and testability.
+> **Fork Information**: This project is a refactored fork of the original [WizLib](https://github.com/nmoschkin/WizLib). It has been modernized and restructured to improve maintainability, separation of concerns, and testability.
 
 ## 🚀 Key Improvements in this Fork
 
