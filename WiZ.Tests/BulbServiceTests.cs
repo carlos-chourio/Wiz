@@ -3,14 +3,12 @@ using System.Net;
 using System.Threading.Tasks;
 using Xunit;
 using WiZ.Models;
+using WiZ.Helpers;
 using WiZ.Services;
-using WiZ.Profiles;
+using Microsoft.Extensions.Logging.Abstractions; // Added for NullLogger
 
 namespace WiZ.Tests
 {
-    /// <summary>
-    /// Refactored tests for BulbService and BulbModel.
-    /// </summary>
     public class BulbServiceTests
     {
         private readonly BulbService _bulbService;
@@ -19,7 +17,18 @@ namespace WiZ.Tests
 
         public BulbServiceTests()
         {
-            _bulbService = new BulbService();
+            // 1. Create a "dummy" logger for the UDP service
+            var udpLogger = NullLogger<UdpCommunicationService>.Instance;
+            
+            // 2. Create the UDP service
+            var udpService = new UdpCommunicationService(udpLogger);
+
+            // 3. Create a "dummy" logger for the Bulb service
+            var bulbLogger = NullLogger<BulbService>.Instance;
+
+            // 4. Manually inject the dependencies into the service
+            // We use 5000 for the timeout as used in your Program.cs
+            _bulbService = new BulbService(udpService, 5000, bulbLogger);
         }
 
         [Fact]
@@ -36,10 +45,9 @@ namespace WiZ.Tests
         [Fact]
         public async Task BulbService_GetBulbByMacAsync_ShouldReturnModel()
         {
-            // Note: This might actually try to scan if not in cache
             var mac = MACAddress.Parse(TestMac);
             var bulb = await _bulbService.GetBulbByMacAsync(mac);
-            
+            // Assert.IsNotNull(bulb);
             // In a test environment without real bulbs, this might be null if scan fails
             // but we can at least verify the service logic doesn't crash.
         }
@@ -77,19 +85,13 @@ namespace WiZ.Tests
         [Fact]
         public async Task BulbService_Integration_BasicControls_ShouldWorkAndLeaveOn()
         {
-            // This test is more of an integration test as it talks to the real network
-            // using the UdpCommunicationService singleton.
-            
             var mac = MACAddress.Parse(TestMac);
             var ip = IPAddress.Parse(TestIp);
             var bulb = new BulbModel(ip) { MACAddress = mac };
             
-            // First, make sure we can get the state
-            // await _bulbService.GetPilotAsync(bulb);
-            
             // Test brightness
-            await _bulbService.SetBrightnessAsync(bulb, 10);
-            Assert.Equal(10, bulb.Brightness);
+            await _bulbService.SetBrightnessAsync(bulb, 50);
+            Assert.Equal(50, bulb.Brightness);
             await Task.Delay(1000);
 
             // Test color
@@ -97,20 +99,17 @@ namespace WiZ.Tests
             Assert.Equal(System.Drawing.Color.FromArgb(255, 0, 0), bulb.Settings.Color);
             await Task.Delay(1000);
 
-            // Test setting a scene (using a known scene code)
+            // Test setting a scene
             await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.LightModes[1]);
             Assert.Equal(1, (int)bulb.Settings.Scene);
             await Task.Delay(1000);
-
 
             // Turn off briefly
             await _bulbService.TurnOffAsync(bulb);
             Assert.False(bulb.IsPoweredOn);
             await Task.Delay(1000);
 
-
             // Finally, turn it back ON and set it to a solid Warm White scene (11)
-            // Scene 11 is a built-in static Warm White mode that should definitely stop the blue animation!
             await _bulbService.TurnOnAsync(bulb);
             await _bulbService.SetBrightnessAsync(bulb, 100);
             await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.WarmWhite);
