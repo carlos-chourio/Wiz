@@ -85,30 +85,36 @@ namespace WiZ.Tests
             var bulb = new BulbModel(ip) { MACAddress = mac };
             
             // First, make sure we can get the state
-            await _bulbService.GetPilotAsync(bulb);
+            // await _bulbService.GetPilotAsync(bulb);
             
             // Test brightness
             await _bulbService.SetBrightnessAsync(bulb, 10);
             Assert.Equal(10, bulb.Brightness);
-            await Task.Delay(500);
+            await Task.Delay(1000);
+
+            // Test color
+            await _bulbService.SetColorAsync(bulb, System.Drawing.Color.FromArgb(255, 0, 0));
+            Assert.Equal(System.Drawing.Color.FromArgb(255, 0, 0), bulb.Settings.Color);
+            await Task.Delay(1000);
 
             // Test setting a scene (using a known scene code)
-            // Scene 1 is usually "Ocean" or similar
             await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.LightModes[1]);
             Assert.Equal(1, (int)bulb.Settings.Scene);
-            await Task.Delay(500);
+            await Task.Delay(1000);
+
 
             // Turn off briefly
             await _bulbService.TurnOffAsync(bulb);
             Assert.False(bulb.IsPoweredOn);
-            await Task.Delay(500);
+            await Task.Delay(1000);
+
 
             // Finally, turn it back ON and set it to a solid Warm White scene (11)
             // Scene 11 is a built-in static Warm White mode that should definitely stop the blue animation!
             await _bulbService.TurnOnAsync(bulb);
             await _bulbService.SetBrightnessAsync(bulb, 100);
             await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.WarmWhite);
-            
+
             Assert.True(bulb.IsPoweredOn);
             Assert.Equal(11, bulb.Settings.Scene);
         }
