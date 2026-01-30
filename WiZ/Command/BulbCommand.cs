@@ -82,16 +82,10 @@ namespace WiZ
         /// <param name="json">The JSON command string.</param>
         public BulbCommand(string json)
         {
-            try
+            
+            if (!string.IsNullOrWhiteSpace(json))
             {
-                if (!string.IsNullOrWhiteSpace(json))
-                {
-                    JsonConvert.PopulateObject(json, this, DefaultJsonSettings);
-                }
-            }
-            catch (Exception ex)
-            {
-                Serilog.Log.Error(ex, "Failed to populate BulbCommand from JSON: {Json}", json);
+                JsonConvert.PopulateObject(json, this, DefaultJsonSettings);
             }
         }
         #endregion

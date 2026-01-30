@@ -17,28 +17,19 @@ namespace WiZ.Helpers
     /// </summary>
     public class UdpCommunicationService : IDisposable
     {
-        private static readonly Lazy<UdpCommunicationService> _instance = 
-            new Lazy<UdpCommunicationService>(() => new UdpCommunicationService());
-
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<Guid, PendingRequest> _pendingRequests = new();
         private readonly List<Action<DiscoveryResponse>> _discoveryCallbacks = new();
+        private readonly ILogger<UdpCommunicationService> logger;
         private UdpClient _udpClient;
         private bool _isInitialized = false;
         private bool _disposed = false;
         private IPAddress _boundLocalAddress;
         private Task _listeningTask;
 
-        /// <summary>
-        /// Gets the singleton instance of the UDP communication service.
-        /// </summary>
-        public static UdpCommunicationService Instance => _instance.Value;
-
-        /// <summary>
-        /// Private constructor for singleton pattern.
-        /// </summary>
-        private UdpCommunicationService()
+        public UdpCommunicationService(ILogger<UdpCommunicationService> logger)
         {
+            this.logger = logger;
         }
 
         /// <summary>
@@ -120,7 +111,7 @@ namespace WiZ.Helpers
                 // Send the command
                 _udpClient.Send(commandBytes, commandBytes.Length, targetAddress.ToString(), targetPort);
                 
-                LoggingHelper.LogOutput(command, _boundLocalAddress, targetAddress);
+                logger.LogOutput(command, _boundLocalAddress, targetAddress);
 
                 // Wait for response with timeout
                 using var timeoutCts = new CancellationTokenSource(timeout);
@@ -173,7 +164,7 @@ namespace WiZ.Helpers
                 
                 // Send initial broadcast
                 _udpClient.Send(commandBytes, commandBytes.Length, broadcastAddress.ToString(), BulbService.DefaultPort);
-                LoggingHelper.LogOutput(command, _boundLocalAddress, broadcastAddress);
+                logger.LogOutput(command, _boundLocalAddress, broadcastAddress);
 
                 // Continue broadcasting periodically and collecting responses
                 while (DateTime.Now < endTime)
@@ -213,7 +204,7 @@ namespace WiZ.Helpers
                         var result = receiveTask.Result;
                         var response = Encoding.UTF8.GetString(result.Buffer).Trim('\x0');
                         
-                        LoggingHelper.LogInput(response, _boundLocalAddress, result.RemoteEndPoint.Address);
+                        logger.LogInput(response, _boundLocalAddress, result.RemoteEndPoint.Address);
 
                         // Try to match with a pending request
                         var pendingRequest = FindPendingRequest(result.RemoteEndPoint.Address);

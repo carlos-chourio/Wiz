@@ -1,52 +1,43 @@
 using System;
 using System.Net;
 using System.Runtime.InteropServices;
-using Serilog;
+using Microsoft.Extensions.Logging;
 
 namespace WiZ.Helpers
 {
     public static class LoggingHelper
     {
-        public static void LogInput(string text, string localip, string remoteip)
+        public static void LogInput(this Microsoft.Extensions.Logging.ILogger logger, string text, IPAddress localip, IPAddress remoteip)
         {
-            FormatLog(text, true, localip, remoteip);
-        }
-        public static void LogInput(string text, IPAddress localip, IPAddress remoteip)
-        {
-            FormatLog(text, true, localip, remoteip);
+            logger.FormatLog(text, true, localip, remoteip);
         }
 
-        public static void LogOutput(string text, string localip, string remoteip)
+        public static void LogOutput(this Microsoft.Extensions.Logging.ILogger logger, string text, IPAddress localip, IPAddress remoteip)
         {
-            FormatLog(text, false, localip, remoteip);
+            logger.FormatLog(text, false, localip, remoteip);
         }
 
-        public static void LogOutput(string text, IPAddress localip, IPAddress remoteip)
+        private static void FormatLog(this Microsoft.Extensions.Logging.ILogger logger, string text, bool input, IPAddress localip, IPAddress remoteip)
         {
-            FormatLog(text, false, localip, remoteip);
+            logger.FormatLog(text, input, localip?.ToString(), remoteip?.ToString());
         }
 
-        public static void FormatLog(string text, bool inp, IPAddress localip, IPAddress remoteip)
+        private static void FormatLog(this Microsoft.Extensions.Logging.ILogger logger, string text, bool input, string localip, string remoteip)
         {
-            FormatLog(text, inp, localip?.ToString(), remoteip?.ToString());
-        }
-
-        public static void FormatLog(string text, bool inp, string localip, string remoteip)
-        {
-            var arrow = inp ? "<=" : "=>";
+            var arrow = input ? "<=" : "=>";
             var timestamp = DateTime.Now.ToString("G");
             
             var networkInfo = $"LOCAL: {localip} {arrow} REMOTE: {remoteip}";
             var logMessage = text;
 
-            if (inp)
+            if (input)
             {
-                Log.Information("[{Timestamp}] {NetworkInfo} - Received: {LogMessage}", 
+                logger.LogInformation("[{Timestamp}] {NetworkInfo} - Received: {LogMessage}", 
                     timestamp, networkInfo, logMessage);
             }
             else
             {
-                Log.Information("[{Timestamp}] {NetworkInfo} - Sent: {LogMessage}", 
+                logger.LogInformation("[{Timestamp}] {NetworkInfo} - Sent: {LogMessage}", 
                     timestamp, networkInfo, logMessage);
             }
         }

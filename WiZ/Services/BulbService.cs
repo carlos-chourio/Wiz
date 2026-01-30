@@ -5,7 +5,6 @@ using System.Text;
 using System.Threading.Tasks;
 using WiZ.Models;
 using WiZ.Profiles;
-using Serilog;
 using Microsoft.Extensions.Logging;
 using WiZ.Helpers;
 
@@ -17,9 +16,10 @@ namespace WiZ.Services
     /// </summary>
     public class BulbService
     {
-        private readonly UdpCommunicationService _udpService;
-        private readonly int _timeout;
+        private readonly int timeout;
+        private readonly ILogger<BulbService> logger;
         private static readonly object _cacheLock = new object();
+        private readonly UdpCommunicationService udpCommunicationService;
 
         /// <summary>
         /// Default timeout for bulb operations in milliseconds.
@@ -37,19 +37,19 @@ namespace WiZ.Services
         public static Dictionary<MACAddress, BulbModel> BulbCache { get; } = 
             new Dictionary<MACAddress, BulbModel>();
 
-        public BulbService()
+        public BulbService(UdpCommunicationService udpCommunicationService, ILogger<BulbService> logger) : this(udpCommunicationService, DefaultTimeout, logger)
         {
-            _udpService = UdpCommunicationService.Instance;
-            _timeout = DefaultTimeout;
         }
 
         /// <summary>
         /// Creates a BulbService with custom timeout.
         /// </summary>
         /// <param name="timeout">Timeout in milliseconds.</param>
-        public BulbService(int timeout) : this()
+        public BulbService(UdpCommunicationService udpCommunicationService, int timeout, ILogger<BulbService> logger)
         {
-            _timeout = timeout;
+            this.udpCommunicationService = udpCommunicationService;
+            this.timeout = timeout;
+            this.logger = logger;
         }
 
         #region Discovery Operations
@@ -97,7 +97,7 @@ namespace WiZ.Services
             if (macAddr == null)
                 macAddr = NetworkHelper.DefaultLocalMAC;
 
-            Serilog.Log.Information("Starting bulb discovery on {LocalAddr} with mode {Mode}", localAddr, mode);
+            logger.LogInformation("Starting bulb discovery on {LocalAddr} with mode {Mode}", localAddr, mode);
 
             var pilot = new BulbCommand();
 
@@ -120,9 +120,9 @@ namespace WiZ.Services
             }
 
             var command = pilot.AssembleCommand();
-            Serilog.Log.Information("Sending discovery command: {Command}", command);
+            logger.LogInformation("Sending discovery command: {Command}", command);
 
-            await _udpService.BroadcastCommandAsync(
+            await udpCommunicationService.BroadcastCommandAsync(
                 command,
                 (response) =>
                 {
@@ -151,12 +151,12 @@ namespace WiZ.Services
                     }
                     catch (Exception ex)
                     {
-                        Serilog.Log.Error(ex, "Error processing discovery response from {SourceAddress}", response.SourceAddress);
+                        logger.LogError(ex, "Error processing discovery response from {SourceAddress}", response.SourceAddress);
                     }
                 },
                 timeout);
 
-            Serilog.Log.Information("Discovery completed. Found {Count} bulbs.", bulbs.Count);
+            logger.LogInformation("Discovery completed. Found {Count} bulbs.", bulbs.Count);
             return bulbs;
         }
 
@@ -199,7 +199,7 @@ namespace WiZ.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            Serilog.Log.Information("Getting pilot state from bulb {MacAddress} at {IpAddress}", 
+            logger.LogInformation("Getting pilot state from bulb {MacAddress} at {IpAddress}", 
                 bulb.MACAddress, bulb.IPAddress);
 
             var command = new BulbCommand
@@ -235,7 +235,7 @@ namespace WiZ.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            Serilog.Log.Information("Getting system config from bulb {MacAddress} at {IpAddress}", 
+            logger.LogInformation("Getting system config from bulb {MacAddress} at {IpAddress}", 
                 bulb.MACAddress, bulb.IPAddress);
 
             var command = new BulbCommand
@@ -271,7 +271,7 @@ namespace WiZ.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            Serilog.Log.Information("Getting model config from bulb {MacAddress} at {IpAddress}", 
+            logger.LogInformation("Getting model config from bulb {MacAddress} at {IpAddress}", 
                 bulb.MACAddress, bulb.IPAddress);
 
             var command = new BulbCommand
@@ -304,7 +304,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Turning on bulb {MacAddress}", bulb.MACAddress);
+            logger.LogInformation("Turning on bulb {MacAddress}", bulb.MACAddress);
 
             bulb.Settings.State = true;
             return await SetPilotAsync(bulb);
@@ -320,7 +320,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Turning off bulb {MacAddress}", bulb.MACAddress);
+            logger.LogInformation("Turning off bulb {MacAddress}", bulb.MACAddress);
 
             bulb.Settings.State = false;
             return await SetPilotAsync(bulb);
@@ -337,7 +337,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Setting brightness to {Brightness}% for bulb {MacAddress}", brightness, bulb.MACAddress);
+            logger.LogInformation("Setting brightness to {Brightness}% for bulb {MacAddress}", brightness, bulb.MACAddress);
 
             bulb.Settings.Brightness = (byte)brightness;
             return await SetPilotAsync(bulb);
@@ -354,7 +354,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Setting color to RGB({R},{G},{B}) for bulb {MacAddress}", 
+            logger.LogInformation("Setting color to RGB({R},{G},{B}) for bulb {MacAddress}", 
                 color.R, color.G, color.B, bulb.MACAddress);
 
             bulb.Settings.Color = color;
@@ -372,7 +372,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Setting temperature to {Temperature}K for bulb {MacAddress}", temperature, bulb.MACAddress);
+            logger.LogInformation("Setting temperature to {Temperature}K for bulb {MacAddress}", temperature, bulb.MACAddress);
 
             bulb.Settings.Scene = 0; // Set to manual mode
             bulb.Settings.Color = null; // Clear RGB values
@@ -391,7 +391,7 @@ namespace WiZ.Services
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            Serilog.Log.Information("Setting scene to {Scene} for bulb {MacAddress}", scene.Name, bulb.MACAddress);
+            logger.LogInformation("Setting scene to {Scene} for bulb {MacAddress}", scene.Name, bulb.MACAddress);
 
             bulb.Settings.Scene = (byte?)scene.Code;
             // LightModeInfo is read-only, will be updated internally by BulbParams
@@ -412,11 +412,11 @@ namespace WiZ.Services
         {
             try
             {
-                return await _udpService.SendCommandAsync(command, bulb.IPAddress, bulb.Port, _timeout);
+                return await udpCommunicationService.SendCommandAsync(command, bulb.IPAddress, bulb.Port, timeout);
             }
             catch (Exception ex)
             {
-                Serilog.Log.Warning(ex, "Failed to send command to {IpAddress}", bulb.IPAddress);
+                logger.LogWarning(ex, "Failed to send command to {IpAddress}", bulb.IPAddress);
                 return null;
             }
         }

@@ -2,40 +2,51 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Serilog;
 using WiZ;
 using WiZ.Models;
 using WiZ.Services;
-using Serilog;
-using System.Collections.Generic;
+using WiZ.Helpers;
 
 namespace WiZ.Console
 {
     class Program
     {
         private const string TestBulbConfigFile = "test_bulb_config.json";
-        private static readonly BulbService _bulbService = new BulbService();
-        
+        private static BulbService bulbService;
+
         static async Task Main(string[] args)
         {
-            // Configure Serilog
+            // 1. Configure Serilog
             Log.Logger = new LoggerConfiguration()
+                .MinimumLevel.Debug()
                 .WriteTo.Console()
                 .CreateLogger();
 
-            
-            System.Console.WriteLine("=== WiZ Bulb Testing Console ===");
-            System.Console.WriteLine();
-
             try
             {
+                // 2. Set up Dependency Injection
+                var services = new ServiceCollection();
+                ConfigureServices(services);
+                var serviceProvider = services.BuildServiceProvider();
+
+                // 3. Resolve BulbService (This automatically injects ILogger and UdpCommunicationService)
+                bulbService = serviceProvider.GetRequiredService<BulbService>();
+
+                System.Console.WriteLine("=== WiZ Bulb Testing Console ===");
+                System.Console.WriteLine();
+
                 var testBulbConfig = LoadTestBulbConfig();
                 BulbModel? testBulb = null;
-                
+
                 if (testBulbConfig == null)
                 {
                     System.Console.WriteLine("No test bulb configured. Starting discovery...");
                     testBulb = await DiscoverAndSelectBulb();
-                    
+
                     if (testBulb != null)
                     {
                         await SaveTestBulbConfig(testBulb);
@@ -50,7 +61,7 @@ namespace WiZ.Console
                 else
                 {
                     System.Console.WriteLine($"Using saved test bulb: {testBulbConfig.MacAddress}");
-                    testBulb = await _bulbService.GetBulbByMacAsync(MACAddress.Parse(testBulbConfig.MacAddress));
+                    testBulb = await bulbService.GetBulbByMacAsync(MACAddress.Parse(testBulbConfig.MacAddress));
                     if (testBulb == null)
                     {
                         System.Console.WriteLine("Failed to connect to saved bulb. Running discovery...");
@@ -70,9 +81,35 @@ namespace WiZ.Console
                 System.Console.WriteLine($"Error: {ex.Message}");
                 System.Console.WriteLine($"Stack trace: {ex.StackTrace}");
             }
+            finally
+            {
+                // Ensure logs are written before closing
+                await Log.CloseAndFlushAsync();
+            }
 
             System.Console.WriteLine("\nPress any key to exit...");
             System.Console.Read();
+        }
+
+        private static void ConfigureServices(IServiceCollection services)
+        {
+            // Add Logging to DI
+            services.AddLogging(builder =>
+            {
+                builder.ClearProviders();
+                builder.AddSerilog(dispose: true);
+            });
+
+            // Register Services
+            services.AddSingleton<UdpCommunicationService>();
+            
+            // Manual registration for BulbService because of the '5000' timeout parameter
+            services.AddSingleton<BulbService>(sp =>
+            {
+                var udp = sp.GetRequiredService<UdpCommunicationService>();
+                var logger = sp.GetRequiredService<ILogger<BulbService>>();
+                return new BulbService(udp, 5000, logger);
+            });
         }
 
         private static async Task<BulbModel?> DiscoverAndSelectBulb()
@@ -84,7 +121,7 @@ namespace WiZ.Console
             var localAddr = WiZ.NetworkHelper.DefaultLocalIP;
             var macAddr = WiZ.NetworkHelper.DefaultLocalMAC;
 
-            var discoveredBulbs = await _bulbService.ScanForBulbsAsync(
+            var discoveredBulbs = await bulbService.ScanForBulbsAsync(
                 localAddr,
                 macAddr,
                 WiZ.ScanMode.GetSystemConfig,
@@ -117,12 +154,12 @@ namespace WiZ.Console
 
                 System.Console.Write("Enter bulb number (or press Enter for first bulb): ");
                 var input = System.Console.ReadLine();
-                
+
                 if (int.TryParse(input, out int selection) && selection > 0 && selection <= discoveredBulbs.Count)
                 {
                     return discoveredBulbs[selection - 1];
                 }
-                
+
                 return discoveredBulbs.First();
             }
         }
@@ -133,11 +170,10 @@ namespace WiZ.Console
             System.Console.WriteLine($"Bulb: {bulb.MACAddress} - {bulb.IPAddress}");
             System.Console.WriteLine();
 
-            // Test connection by getting pilot (current state)
             System.Console.WriteLine("Testing connection and getting current state...");
             try
             {
-                await _bulbService.GetPilotAsync(bulb);
+                await bulbService.GetPilotAsync(bulb);
                 System.Console.WriteLine($"Connection successful!");
                 System.Console.WriteLine($"Current state: {(bulb.IsPoweredOn == true ? "ON" : "OFF")}");
                 System.Console.WriteLine($"Brightness: {bulb.Settings?.Brightness ?? 0}%");
@@ -153,65 +189,55 @@ namespace WiZ.Console
 
             System.Console.WriteLine();
 
-            // Test basic controls
             await TestBasicControls(bulb);
-
-            // Test state caching
             await TestStateCaching(bulb);
-
-            // Test UDP issues
             await TestUdpBehavior(bulb);
         }
 
         private static async Task TestBasicControls(BulbModel bulb)
         {
             System.Console.WriteLine("=== Testing Basic Controls ===");
-            
+
             try
             {
-                // Test turning on
                 System.Console.WriteLine("Turning bulb ON...");
-                await _bulbService.TurnOnAsync(bulb);
-                await Task.Delay(2000); // Wait for state to update
-                
-                // Test brightness
+                await bulbService.TurnOnAsync(bulb);
+                await Task.Delay(2000);
+
                 System.Console.WriteLine("Setting brightness to 50%...");
-                await _bulbService.SetBrightnessAsync(bulb, 50);
+                await bulbService.SetBrightnessAsync(bulb, 50);
                 await Task.Delay(2000);
-                
-                // Test turning off
+
                 System.Console.WriteLine("Turning bulb OFF...");
-                await _bulbService.TurnOffAsync(bulb);
+                await bulbService.TurnOffAsync(bulb);
                 await Task.Delay(2000);
-                
+
                 System.Console.WriteLine("Basic controls test completed successfully!");
             }
             catch (Exception ex)
             {
                 System.Console.WriteLine($"Error in basic controls test: {ex.Message}");
             }
-            
+
             System.Console.WriteLine();
         }
 
         private static async Task TestStateCaching(BulbModel bulb)
         {
             System.Console.WriteLine("=== Testing State Caching ===");
-            
+
             try
             {
-                // Turn on using service and check if state is cached correctly
-                await _bulbService.TurnOnAsync(bulb);
+                await bulbService.TurnOnAsync(bulb);
                 await Task.Delay(1000);
-                
+
                 var initialState = bulb.IsPoweredOn;
                 System.Console.WriteLine($"State after turning ON: {initialState}");
-                
-                // Get pilot again to test cache
-                await _bulbService.GetPilotAsync(bulb);
+
+                await bulbService.GetPilotAsync(bulb);
                 var refreshedState = bulb.IsPoweredOn;
                 System.Console.WriteLine($"State after refresh: {refreshedState}");
-                
+
                 if (initialState == refreshedState && refreshedState == true)
                 {
                     System.Console.WriteLine("✓ State caching is working correctly");
@@ -226,19 +252,18 @@ namespace WiZ.Console
             {
                 System.Console.WriteLine($"Error in state caching test: {ex.Message}");
             }
-            
+
             System.Console.WriteLine();
         }
 
         private static async Task TestUdpBehavior(BulbModel bulb)
         {
             System.Console.WriteLine("=== Testing UDP Behavior (Simulating Debug Scenario) ===");
-            
+
             try
             {
-                // Simulate multiple rapid calls that might trigger the UDP port binding issue
                 System.Console.WriteLine("Testing multiple rapid commands (simulating breakpoint scenario)...");
-                
+
                 var tasks = new List<Task>();
                 for (int i = 0; i < 5; i++)
                 {
@@ -248,7 +273,7 @@ namespace WiZ.Console
                         try
                         {
                             System.Console.WriteLine($"Task {taskNum}: Getting state...");
-                            await _bulbService.GetPilotAsync(bulb);
+                            await bulbService.GetPilotAsync(bulb);
                             System.Console.WriteLine($"Task {taskNum}: Success");
                         }
                         catch (Exception ex)
@@ -256,10 +281,10 @@ namespace WiZ.Console
                             System.Console.WriteLine($"Task {taskNum}: Failed - {ex.Message}");
                         }
                     }));
-                    
-                    await Task.Delay(100); // Small delay to simulate breakpoint scenario
+
+                    await Task.Delay(100);
                 }
-                
+
                 await Task.WhenAll(tasks);
                 System.Console.WriteLine("UDP behavior test completed!");
             }
@@ -267,7 +292,7 @@ namespace WiZ.Console
             {
                 System.Console.WriteLine($"Error in UDP behavior test: {ex.Message}");
             }
-            
+
             System.Console.WriteLine();
         }
 
@@ -285,7 +310,7 @@ namespace WiZ.Console
             {
                 System.Console.WriteLine($"Warning: Could not load test bulb config: {ex.Message}");
             }
-            
+
             return null;
         }
 
