@@ -103,6 +103,9 @@ namespace WiZ.Tests
             Assert.Equal(1, (int)bulb.Settings.Scene);
             await Task.Delay(1000);
 
+            await _bulbService.SetSceneAsync(bulb, LightMode.Fireplace);
+            await Task.Delay(1000);
+
             // Turn off briefly
             await _bulbService.TurnOffAsync(bulb);
             Assert.False(bulb.IsPoweredOn);
