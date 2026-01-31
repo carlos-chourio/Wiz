@@ -10,6 +10,6 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <ProjectReference Include="../WiZ/WiZ.csproj" />
+    <ProjectReference Include="../WiZ.NET/WiZ.NET.csproj" />
   </ItemGroup>
 </Project>

@@ -2,11 +2,10 @@ using System;
 using System.Net;
 using System.Threading.Tasks;
 using Xunit;
-using WiZ.Models;
-using WiZ.Helpers;
-using WiZ.Services;
-using Microsoft.Extensions.Logging.Abstractions; // Added for NullLogger
-
+using WiZ.NET.Models;
+using WiZ.NET.Services;
+using Microsoft.Extensions.Logging.Abstractions;
+using WiZ.NET;
 namespace WiZ.Tests
 {
     public class BulbServiceTests
@@ -100,7 +99,7 @@ namespace WiZ.Tests
             await Task.Delay(1000);
 
             // Test setting a scene
-            await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.LightModes[1]);
+            await _bulbService.SetSceneAsync(bulb, WiZ.NET.LightMode.LightModes[1]);
             Assert.Equal(1, (int)bulb.Settings.Scene);
             await Task.Delay(1000);
 
@@ -112,7 +111,7 @@ namespace WiZ.Tests
             // Finally, turn it back ON and set it to a solid Warm White scene (11)
             await _bulbService.TurnOnAsync(bulb);
             await _bulbService.SetBrightnessAsync(bulb, 100);
-            await _bulbService.SetSceneAsync(bulb, WiZ.LightMode.WarmWhite);
+            await _bulbService.SetSceneAsync(bulb, WiZ.NET.LightMode.WarmWhite);
 
             Assert.True(bulb.IsPoweredOn);
             Assert.Equal(11, bulb.Settings.Scene);

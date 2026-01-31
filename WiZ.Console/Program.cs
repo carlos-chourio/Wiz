@@ -7,9 +7,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
 using WiZ;
-using WiZ.Models;
-using WiZ.Services;
-using WiZ.Helpers;
+using WiZ.NET.Models;
+using WiZ.NET.Services;
+using WiZ.NET.Helpers;
+using WiZ.NET;
 
 namespace WiZ.Console
 {
@@ -118,13 +119,13 @@ namespace WiZ.Console
             System.Console.WriteLine("This will scan for 10 seconds. Please wait...");
             System.Console.WriteLine();
 
-            var localAddr = WiZ.NetworkHelper.DefaultLocalIP;
-            var macAddr = WiZ.NetworkHelper.DefaultLocalMAC;
+            var localAddr = WiZ.NET.NetworkHelper.DefaultLocalIP;
+            var macAddr = WiZ.NET.NetworkHelper.DefaultLocalMAC;
 
             var discoveredBulbs = await bulbService.ScanForBulbsAsync(
                 localAddr,
                 macAddr,
-                WiZ.ScanMode.GetSystemConfig,
+                WiZ.NET.ScanMode.GetSystemConfig,
                 10000,
                 (bulb) =>
                 {
