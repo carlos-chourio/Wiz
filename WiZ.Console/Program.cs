@@ -10,6 +10,8 @@ using WiZ;
 using WiZ.NET.Models;
 using WiZ.NET.Services;
 using WiZ.NET.Helpers;
+using WiZ.NET.Interfaces;
+using WiZ.NET.Extensions;
 using WiZ.NET;
 
 namespace WiZ.Console
@@ -17,7 +19,7 @@ namespace WiZ.Console
     class Program
     {
         private const string TestBulbConfigFile = "test_bulb_config.json";
-        private static BulbService bulbService;
+        private static IBulbService? bulbService;
 
         static async Task Main(string[] args)
         {
@@ -35,7 +37,7 @@ namespace WiZ.Console
                 var serviceProvider = services.BuildServiceProvider();
 
                 // 3. Resolve BulbService (This automatically injects ILogger and UdpCommunicationService)
-                bulbService = serviceProvider.GetRequiredService<BulbService>();
+                bulbService = serviceProvider.GetRequiredService<IBulbService>();
 
                 System.Console.WriteLine("=== WiZ Bulb Testing Console ===");
                 System.Console.WriteLine();
@@ -101,20 +103,15 @@ namespace WiZ.Console
                 builder.AddSerilog(dispose: true);
             });
 
-            // Register Services
-            services.AddSingleton<UdpCommunicationService>();
-            
-            // Manual registration for BulbService because of the '5000' timeout parameter
-            services.AddSingleton<BulbService>(sp =>
-            {
-                var udp = sp.GetRequiredService<UdpCommunicationService>();
-                var logger = sp.GetRequiredService<ILogger<BulbService>>();
-                return new BulbService(udp, 5000, logger);
-            });
+            // Register WiZ.NET services with 5000ms timeout
+            services.AddWiZNET(timeout: 5000);
         }
 
         private static async Task<BulbModel?> DiscoverAndSelectBulb()
         {
+            if (bulbService == null)
+                throw new InvalidOperationException("BulbService is not initialized");
+
             System.Console.WriteLine("Discovering WiZ bulbs on your network...");
             System.Console.WriteLine("This will scan for 10 seconds. Please wait...");
             System.Console.WriteLine();
@@ -167,6 +164,9 @@ namespace WiZ.Console
 
         private static async Task TestBulbInteractions(BulbModel bulb)
         {
+            if (bulbService == null)
+                throw new InvalidOperationException("BulbService is not initialized");
+
             System.Console.WriteLine("\n=== Testing Bulb Interactions ===");
             System.Console.WriteLine($"Bulb: {bulb.MACAddress} - {bulb.IPAddress}");
             System.Console.WriteLine();
@@ -174,7 +174,7 @@ namespace WiZ.Console
             System.Console.WriteLine("Testing connection and getting current state...");
             try
             {
-                await bulbService.GetPilotAsync(bulb);
+                await bulbService.RefreshStateAsync(bulb);
                 System.Console.WriteLine($"Connection successful!");
                 System.Console.WriteLine($"Current state: {(bulb.IsPoweredOn == true ? "ON" : "OFF")}");
                 System.Console.WriteLine($"Brightness: {bulb.Settings?.Brightness ?? 0}%");
@@ -197,6 +197,9 @@ namespace WiZ.Console
 
         private static async Task TestBasicControls(BulbModel bulb)
         {
+            if (bulbService == null)
+                throw new InvalidOperationException("BulbService is not initialized");
+
             System.Console.WriteLine("=== Testing Basic Controls ===");
 
             try
@@ -225,6 +228,9 @@ namespace WiZ.Console
 
         private static async Task TestStateCaching(BulbModel bulb)
         {
+            if (bulbService == null)
+                throw new InvalidOperationException("BulbService is not initialized");
+
             System.Console.WriteLine("=== Testing State Caching ===");
 
             try
@@ -235,7 +241,7 @@ namespace WiZ.Console
                 var initialState = bulb.IsPoweredOn;
                 System.Console.WriteLine($"State after turning ON: {initialState}");
 
-                await bulbService.GetPilotAsync(bulb);
+                await bulbService.RefreshStateAsync(bulb);
                 var refreshedState = bulb.IsPoweredOn;
                 System.Console.WriteLine($"State after refresh: {refreshedState}");
 
@@ -259,6 +265,9 @@ namespace WiZ.Console
 
         private static async Task TestUdpBehavior(BulbModel bulb)
         {
+            if (bulbService == null)
+                throw new InvalidOperationException("BulbService is not initialized");
+
             System.Console.WriteLine("=== Testing UDP Behavior (Simulating Debug Scenario) ===");
 
             try
@@ -274,7 +283,7 @@ namespace WiZ.Console
                         try
                         {
                             System.Console.WriteLine($"Task {taskNum}: Getting state...");
-                            await bulbService.GetPilotAsync(bulb);
+                            await bulbService.RefreshStateAsync(bulb);
                             System.Console.WriteLine($"Task {taskNum}: Success");
                         }
                         catch (Exception ex)

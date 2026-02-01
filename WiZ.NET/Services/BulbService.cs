@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
-using WiZ.NET.Models;
 using Microsoft.Extensions.Logging;
+using WiZ.NET.Interfaces;
+using WiZ.NET.Models;
 
 namespace WiZ.NET.Services
 {
@@ -11,12 +13,12 @@ namespace WiZ.NET.Services
     /// Service for handling WiZ bulb operations and communication.
     /// This service handles all bulb actions while BulbModel represents the bulb state.
     /// </summary>
-    public class BulbService
+    public class BulbService : IBulbService
     {
         private readonly int timeout;
         private readonly ILogger<BulbService> logger;
-        private static readonly object _cacheLock = new object();
-        private readonly UdpCommunicationService udpCommunicationService;
+        private readonly IUdpCommunicationService udpCommunicationService;
+        private readonly IBulbCache bulbCache;
 
         /// <summary>
         /// Default timeout for bulb operations in milliseconds.
@@ -29,12 +31,13 @@ namespace WiZ.NET.Services
         public const int DefaultPort = 38899;
 
         /// <summary>
-        /// Cache of bulbs indexed by MAC address for quick lookup.
+        /// Creates a BulbService with default timeout.
         /// </summary>
-        public static Dictionary<MACAddress, BulbModel> BulbCache { get; } = 
-            new Dictionary<MACAddress, BulbModel>();
-
-        public BulbService(UdpCommunicationService udpCommunicationService, ILogger<BulbService> logger) : this(udpCommunicationService, DefaultTimeout, logger)
+        public BulbService(
+            IUdpCommunicationService udpCommunicationService, 
+            IBulbCache bulbCache,
+            ILogger<BulbService> logger) 
+            : this(udpCommunicationService, bulbCache, DefaultTimeout, logger)
         {
         }
 
@@ -42,48 +45,43 @@ namespace WiZ.NET.Services
         /// Creates a BulbService with custom timeout.
         /// </summary>
         /// <param name="timeout">Timeout in milliseconds.</param>
-        public BulbService(UdpCommunicationService udpCommunicationService, int timeout, ILogger<BulbService> logger)
+        public BulbService(
+            IUdpCommunicationService udpCommunicationService, 
+            IBulbCache bulbCache,
+            int timeout, 
+            ILogger<BulbService> logger)
         {
-            this.udpCommunicationService = udpCommunicationService;
+            this.udpCommunicationService = udpCommunicationService ?? throw new ArgumentNullException(nameof(udpCommunicationService));
+            this.bulbCache = bulbCache ?? throw new ArgumentNullException(nameof(bulbCache));
             this.timeout = timeout;
-            this.logger = logger;
+            this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
         #region Discovery Operations
 
-        /// <summary>
-        /// Discovers bulbs on default network.
-        /// </summary>
-        /// <param name="timeout">Discovery timeout in milliseconds.</param>
-        /// <param name="callback">Callback for each discovered bulb.</param>
-        /// <returns>List of discovered bulbs.</returns>
+        /// <inheritdoc />
         public async Task<List<BulbModel>> ScanForBulbsAsync(
             int timeout = 5000,
-            Action<BulbModel> callback = null)
+            Action<BulbModel> callback = null,
+            CancellationToken cancellationToken = default)
         {
             return await ScanForBulbsAsync(
                 NetworkHelper.DefaultLocalIP,
                 NetworkHelper.DefaultLocalMAC,
                 ScanMode.GetSystemConfig,
                 timeout,
-                callback);
+                callback,
+                cancellationToken);
         }
 
-        /// <summary>
-        /// Discovers bulbs on specified network interface.
-        /// </summary>
-        /// <param name="localAddr">Local IP address.</param>
-        /// <param name="macAddr">Local MAC address.</param>
-        /// <param name="mode">Scan mode to use.</param>
-        /// <param name="timeout">Discovery timeout in milliseconds.</param>
-        /// <param name="callback">Callback for each discovered bulb.</param>
-        /// <returns>List of discovered bulbs.</returns>
+        /// <inheritdoc />
         public async Task<List<BulbModel>> ScanForBulbsAsync(
             IPAddress localAddr,
             MACAddress? macAddr,
             ScanMode mode = ScanMode.GetSystemConfig,
             int timeout = 5000,
-            Action<BulbModel> callback = null)
+            Action<BulbModel> callback = null,
+            CancellationToken cancellationToken = default)
         {
             var bulbs = new List<BulbModel>();
             var discoveredMacAddresses = new HashSet<string>();
@@ -94,88 +92,101 @@ namespace WiZ.NET.Services
             if (macAddr == null)
                 macAddr = NetworkHelper.DefaultLocalMAC;
 
-            logger.LogInformation("Starting bulb discovery on {LocalAddr} with mode {Mode}", localAddr, mode);
-
-            var pilot = new BulbCommand();
-
-            // Configure discovery command based on mode
-            switch (mode)
+            using (logger.BeginScope(new Dictionary<string, object>
             {
-                case ScanMode.Registration:
-                    pilot.Method = BulbMethod.Registration;
-                    pilot.Params.PhoneMac = macAddr.ToString().Replace(":", "").ToLower();
-                    pilot.Params.Register = false;
-                    pilot.Params.PhoneIp = localAddr.ToString();
-                    pilot.Params.Id = "12";
-                    break;
-                case ScanMode.GetPilot:
-                    pilot.Method = BulbMethod.GetPilot;
-                    break;
-                default:
-                    pilot.Method = BulbMethod.GetSystemConfig;
-                    break;
+                ["LocalAddress"] = localAddr,
+                ["ScanMode"] = mode,
+                ["Timeout"] = timeout
+            }))
+            {
+                logger.LogInformation("Starting bulb discovery on {LocalAddr} with mode {Mode}", localAddr, mode);
+
+                var pilot = new BulbCommand();
+
+                // Configure discovery command based on mode
+                switch (mode)
+                {
+                    case ScanMode.Registration:
+                        pilot.Method = BulbMethod.Registration;
+                        pilot.Params.PhoneMac = macAddr.ToString().Replace(":", "").ToLower();
+                        pilot.Params.Register = false;
+                        pilot.Params.PhoneIp = localAddr.ToString();
+                        pilot.Params.Id = "12";
+                        break;
+                    case ScanMode.GetPilot:
+                        pilot.Method = BulbMethod.GetPilot;
+                        break;
+                    default:
+                        pilot.Method = BulbMethod.GetSystemConfig;
+                        break;
+                }
+
+                var command = pilot.AssembleCommand();
+                logger.LogDebug("Sending discovery command: {Command}", command);
+
+                await udpCommunicationService.BroadcastCommandAsync(
+                    command,
+                    (response) =>
+                    {
+                        try
+                        {
+                            var bulbCommand = new BulbCommand(response.Response);
+                            if (bulbCommand.Result?.MACAddress == null) return;
+
+                            var macAddress = bulbCommand.Result.MACAddress ?? MACAddress.None;
+                            var macString = macAddress.ToString();
+
+                            if (discoveredMacAddresses.Contains(macString)) return;
+
+                            var bulbModel = CreateBulbFromResponse(response.SourceAddress, bulbCommand);
+
+                            // Update cache
+                            bulbCache.Set(macAddress, bulbModel);
+
+                            bulbs.Add(bulbModel);
+                            discoveredMacAddresses.Add(macString);
+
+                            callback?.Invoke(bulbModel);
+
+                            logger.LogDebug("Discovered bulb: {MacAddress} at {IpAddress}", 
+                                macAddress, response.SourceAddress);
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogError(ex, "Error processing discovery response from {SourceAddress}", 
+                                response.SourceAddress);
+                        }
+                    },
+                    timeout,
+                    cancellationToken);
+
+                logger.LogInformation("Discovery completed. Found {Count} bulbs.", bulbs.Count);
             }
 
-            var command = pilot.AssembleCommand();
-            logger.LogInformation("Sending discovery command: {Command}", command);
-
-            await udpCommunicationService.BroadcastCommandAsync(
-                command,
-                (response) =>
-                {
-                    try
-                    {
-                        var bulbCommand = new BulbCommand(response.Response);
-                        if (bulbCommand.Result?.MACAddress == null) return;
-
-                        var macAddress = bulbCommand.Result.MACAddress ?? MACAddress.None;
-                        var macString = macAddress.ToString();
-
-                        if (discoveredMacAddresses.Contains(macString)) return;
-
-                        var bulbModel = CreateBulbFromResponse(response.SourceAddress, bulbCommand);
-
-                        // Update cache
-                        lock (_cacheLock)
-                        {
-                            BulbCache[macAddress] = bulbModel;
-                        }
-
-                        bulbs.Add(bulbModel);
-                        discoveredMacAddresses.Add(macString);
-
-                        callback?.Invoke(bulbModel);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Error processing discovery response from {SourceAddress}", response.SourceAddress);
-                    }
-                },
-                timeout);
-
-            logger.LogInformation("Discovery completed. Found {Count} bulbs.", bulbs.Count);
             return bulbs;
         }
 
-        /// <summary>
-        /// Gets a bulb by its MAC address. Scans if not found in cache.
-        /// </summary>
-        public async Task<BulbModel> GetBulbByMacAsync(MACAddress macAddr, bool forceScan = false)
+        /// <inheritdoc />
+        public async Task<BulbModel> GetBulbByMacAsync(
+            MACAddress macAddr, 
+            bool forceScan = false,
+            CancellationToken cancellationToken = default)
         {
-            lock (_cacheLock)
+            if (!forceScan && bulbCache.Contains(macAddr))
             {
-                if (!forceScan && BulbCache.ContainsKey(macAddr))
-                    return BulbCache[macAddr];
+                logger.LogDebug("Returning cached bulb: {MacAddress}", macAddr);
+                return bulbCache.Get(macAddr);
             }
 
-            await ScanForBulbsAsync(2000);
+            logger.LogInformation("Bulb not in cache, scanning for {MacAddress}", macAddr);
+            await ScanForBulbsAsync(2000, cancellationToken: cancellationToken);
 
-            lock (_cacheLock)
+            if (bulbCache.Contains(macAddr))
             {
-                if (BulbCache.ContainsKey(macAddr))
-                    return BulbCache[macAddr];
+                return bulbCache.Get(macAddr);
             }
 
+            logger.LogWarning("Bulb not found: {MacAddress}", macAddr);
             return null;
         }
 
@@ -183,12 +194,10 @@ namespace WiZ.NET.Services
 
         #region Bulb Operations
 
-        /// <summary>
-        /// Gets the current pilot (state) from a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to query.</param>
-        /// <returns>Updated bulb model with current state.</returns>
-        public async Task<BulbModel> GetPilotAsync(BulbModel bulb)
+        /// <inheritdoc />
+        public async Task RefreshStateAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -196,35 +205,40 @@ namespace WiZ.NET.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            logger.LogInformation("Getting pilot state from bulb {MacAddress} at {IpAddress}", 
-                bulb.MACAddress, bulb.IPAddress);
-
-            var command = new BulbCommand
+            using (logger.BeginScope(new Dictionary<string, object>
             {
-                Method = BulbMethod.GetPilot
-            };
-
-            var response = await SendCommandAsync(bulb, command.AssembleCommand());
-            
-            if (!string.IsNullOrEmpty(response))
+                ["MacAddress"] = bulb.MACAddress,
+                ["IPAddress"] = bulb.IPAddress,
+                ["Operation"] = "GetPilot"
+            }))
             {
-                var bulbCommand = new BulbCommand(response);
-                if (bulbCommand.Result != null)
+                logger.LogInformation("Getting pilot state from bulb {MacAddress} at {IpAddress}", 
+                    bulb.MACAddress, bulb.IPAddress);
+
+                var command = new BulbCommand
                 {
-                    bulbCommand.Result.CopyTo(bulb.Settings);
-                    bulb.UpdateLastSeen();
-                }
-            }
+                    Method = BulbMethod.GetPilot
+                };
 
-            return bulb;
+                var response = await SendCommandAsync(bulb, command.AssembleCommand(), cancellationToken);
+                
+                if (!string.IsNullOrEmpty(response))
+                {
+                    var bulbCommand = new BulbCommand(response);
+                    if (bulbCommand.Result != null)
+                    {
+                        bulbCommand.Result.CopyTo(bulb.Settings);
+                        bulb.UpdateLastSeen();
+                    }
+                }
+
+            }
         }
 
-        /// <summary>
-        /// Gets system configuration from a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to query.</param>
-        /// <returns>Updated bulb model with system configuration.</returns>
-        public async Task<BulbModel> GetSystemConfigAsync(BulbModel bulb)
+        /// <inheritdoc />
+        public async Task RefreshSystemConfigAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -232,35 +246,39 @@ namespace WiZ.NET.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            logger.LogInformation("Getting system config from bulb {MacAddress} at {IpAddress}", 
-                bulb.MACAddress, bulb.IPAddress);
-
-            var command = new BulbCommand
+            using (logger.BeginScope(new Dictionary<string, object>
             {
-                Method = BulbMethod.GetSystemConfig
-            };
-
-            var response = await SendCommandAsync(bulb, command.AssembleCommand());
-            
-            if (!string.IsNullOrEmpty(response))
+                ["MacAddress"] = bulb.MACAddress,
+                ["IPAddress"] = bulb.IPAddress,
+                ["Operation"] = "GetSystemConfig"
+            }))
             {
-                var bulbCommand = new BulbCommand(response);
-                if (bulbCommand.Result != null)
+                logger.LogInformation("Getting system config from bulb {MacAddress} at {IpAddress}", 
+                    bulb.MACAddress, bulb.IPAddress);
+
+                var command = new BulbCommand
                 {
-                    bulbCommand.Result.CopyTo(bulb.Settings);
-                    bulb.UpdateLastSeen();
+                    Method = BulbMethod.GetSystemConfig
+                };
+
+                var response = await SendCommandAsync(bulb, command.AssembleCommand(), cancellationToken);
+                
+                if (!string.IsNullOrEmpty(response))
+                {
+                    var bulbCommand = new BulbCommand(response);
+                    if (bulbCommand.Result != null)
+                    {
+                        bulbCommand.Result.CopyTo(bulb.Settings);
+                        bulb.UpdateLastSeen();
+                    }
                 }
             }
-
-            return bulb;
         }
 
-        /// <summary>
-        /// Gets Model configuration from a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to query.</param>
-        /// <returns>Updated bulb model with model configuration.</returns>
-        public async Task<BulbModel> GetModelConfigAsync(BulbModel bulb)
+        /// <inheritdoc />
+        public async Task RefreshModelConfigAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -268,35 +286,39 @@ namespace WiZ.NET.Services
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
 
-            logger.LogInformation("Getting model config from bulb {MacAddress} at {IpAddress}", 
-                bulb.MACAddress, bulb.IPAddress);
-
-            var command = new BulbCommand
+            using (logger.BeginScope(new Dictionary<string, object>
             {
-                Method = BulbMethod.GetModelConfig
-            };
-
-            var response = await SendCommandAsync(bulb, command.AssembleCommand());
-            
-            if (!string.IsNullOrEmpty(response))
+                ["MacAddress"] = bulb.MACAddress,
+                ["IPAddress"] = bulb.IPAddress,
+                ["Operation"] = "GetModelConfig"
+            }))
             {
-                var bulbCommand = new BulbCommand(response);
-                if (bulbCommand.Result != null)
+                logger.LogInformation("Getting model config from bulb {MacAddress} at {IpAddress}", 
+                    bulb.MACAddress, bulb.IPAddress);
+
+                var command = new BulbCommand
                 {
-                    bulbCommand.Result.CopyTo(bulb.Settings);
-                    bulb.UpdateLastSeen();
+                    Method = BulbMethod.GetModelConfig
+                };
+
+                var response = await SendCommandAsync(bulb, command.AssembleCommand(), cancellationToken);
+                
+                if (!string.IsNullOrEmpty(response))
+                {
+                    var bulbCommand = new BulbCommand(response);
+                    if (bulbCommand.Result != null)
+                    {
+                        bulbCommand.Result.CopyTo(bulb.Settings);
+                        bulb.UpdateLastSeen();
+                    }
                 }
             }
-
-            return bulb;
         }
 
-        /// <summary>
-        /// Turns a bulb on.
-        /// </summary>
-        /// <param name="bulb">The bulb to turn on.</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> TurnOnAsync(BulbModel bulb)
+        /// <inheritdoc />
+        public async Task<BulbModel> TurnOnAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -304,15 +326,13 @@ namespace WiZ.NET.Services
             logger.LogInformation("Turning on bulb {MacAddress}", bulb.MACAddress);
 
             bulb.Settings.State = true;
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
-        /// <summary>
-        /// Turns a bulb off.
-        /// </summary>
-        /// <param name="bulb">The bulb to turn off.</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> TurnOffAsync(BulbModel bulb)
+        /// <inheritdoc />
+        public async Task<BulbModel> TurnOffAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -320,33 +340,30 @@ namespace WiZ.NET.Services
             logger.LogInformation("Turning off bulb {MacAddress}", bulb.MACAddress);
 
             bulb.Settings.State = false;
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
-        /// <summary>
-        /// Sets the brightness of a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to set brightness for.</param>
-        /// <param name="brightness">Brightness level (0-100).</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> SetBrightnessAsync(BulbModel bulb, int brightness)
+        /// <inheritdoc />
+        public async Task<BulbModel> SetBrightnessAsync(
+            BulbModel bulb, 
+            int brightness,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            logger.LogInformation("Setting brightness to {Brightness}% for bulb {MacAddress}", brightness, bulb.MACAddress);
+            logger.LogInformation("Setting brightness to {Brightness}% for bulb {MacAddress}", 
+                brightness, bulb.MACAddress);
 
             bulb.Settings.Brightness = (byte)brightness;
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
-        /// <summary>
-        /// Sets the color of a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to set color for.</param>
-        /// <param name="color">RGB color to set.</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> SetColorAsync(BulbModel bulb, System.Drawing.Color color)
+        /// <inheritdoc />
+        public async Task<BulbModel> SetColorAsync(
+            BulbModel bulb, 
+            System.Drawing.Color color,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
@@ -355,44 +372,41 @@ namespace WiZ.NET.Services
                 color.R, color.G, color.B, bulb.MACAddress);
 
             bulb.Settings.Color = color;
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
-        /// <summary>
-        /// Sets the temperature of a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to set temperature for.</param>
-        /// <param name="temperature">Color temperature in Kelvin.</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> SetTemperatureAsync(BulbModel bulb, int temperature)
+        /// <inheritdoc />
+        public async Task<BulbModel> SetTemperatureAsync(
+            BulbModel bulb, 
+            int temperature,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            logger.LogInformation("Setting temperature to {Temperature}K for bulb {MacAddress}", temperature, bulb.MACAddress);
+            logger.LogInformation("Setting temperature to {Temperature}K for bulb {MacAddress}", 
+                temperature, bulb.MACAddress);
 
             bulb.Settings.Scene = 0; // Set to manual mode
             bulb.Settings.Color = null; // Clear RGB values
             bulb.Settings.Temperature = temperature;
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
-        /// <summary>
-        /// Sets the scene of a bulb.
-        /// </summary>
-        /// <param name="bulb">The bulb to set scene for.</param>
-        /// <param name="scene">Scene to set.</param>
-        /// <returns>The updated bulb model.</returns>
-        public async Task<BulbModel> SetSceneAsync(BulbModel bulb, LightMode scene)
+        /// <inheritdoc />
+        public async Task<BulbModel> SetSceneAsync(
+            BulbModel bulb, 
+            LightMode scene,
+            CancellationToken cancellationToken = default)
         {
             if (bulb == null)
                 throw new ArgumentNullException(nameof(bulb));
 
-            logger.LogInformation("Setting scene to {Scene} for bulb {MacAddress}", scene.Name, bulb.MACAddress);
+            logger.LogInformation("Setting scene to {Scene} for bulb {MacAddress}", 
+                scene.Name, bulb.MACAddress);
 
             bulb.Settings.Scene = (byte?)scene.Code;
-            // LightModeInfo is read-only, will be updated internally by BulbParams
-            return await SetPilotAsync(bulb);
+            return await SetPilotAsync(bulb, cancellationToken);
         }
 
         #endregion
@@ -402,14 +416,19 @@ namespace WiZ.NET.Services
         /// <summary>
         /// Sends a command to a bulb and returns the response.
         /// </summary>
-        /// <param name="bulb">The bulb to send command to.</param>
-        /// <param name="command">JSON command to send.</param>
-        /// <returns>Response from the bulb.</returns>
-        private async Task<string> SendCommandAsync(BulbModel bulb, string command)
+        private async Task<string> SendCommandAsync(
+            BulbModel bulb, 
+            string command,
+            CancellationToken cancellationToken = default)
         {
             try
             {
-                return await udpCommunicationService.SendCommandAsync(command, bulb.IPAddress, bulb.Port, timeout);
+                return await udpCommunicationService.SendCommandAsync(
+                    command, bulb.IPAddress, bulb.Port, timeout, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -421,9 +440,9 @@ namespace WiZ.NET.Services
         /// <summary>
         /// Sets the pilot (sends bulb settings) to a bulb.
         /// </summary>
-        /// <param name="bulb">The bulb to set pilot for.</param>
-        /// <returns>The updated bulb model.</returns>
-        private async Task<BulbModel> SetPilotAsync(BulbModel bulb)
+        private async Task<BulbModel> SetPilotAsync(
+            BulbModel bulb,
+            CancellationToken cancellationToken = default)
         {
             if (bulb.IPAddress == null)
                 throw new InvalidOperationException("Bulb IP address is not set");
@@ -434,7 +453,7 @@ namespace WiZ.NET.Services
                 Params = bulb.Settings
             };
 
-            var response = await SendCommandAsync(bulb, command.AssembleCommand());
+            var response = await SendCommandAsync(bulb, command.AssembleCommand(), cancellationToken);
             
             if (!string.IsNullOrEmpty(response))
             {
@@ -452,36 +471,29 @@ namespace WiZ.NET.Services
         /// <summary>
         /// Creates a BulbModel from a discovery response.
         /// </summary>
-        /// <param name="sourceAddress">Source IP address of the response.</param>
-        /// <param name="bulbCommand">The bulb command containing bulb information.</param>
-        /// <returns>A new BulbModel instance.</returns>
         private BulbModel CreateBulbFromResponse(IPAddress sourceAddress, BulbCommand bulbCommand)
         {
+            var macAddr = bulbCommand.Result.MACAddress ?? MACAddress.None;
+            
+            // Check if we already have this bulb cached
+            var cachedBulb = bulbCache.Get(macAddr);
+            if (cachedBulb != null)
+            {
+                bulbCommand.Result.CopyTo(cachedBulb.Settings);
+                cachedBulb.IPAddress = sourceAddress;
+                cachedBulb.Port = DefaultPort;
+                cachedBulb.UpdateLastSeen();
+                return cachedBulb;
+            }
+
+            // Create new bulb
             var bulb = new BulbModel(sourceAddress)
             {
-                MACAddress = bulbCommand.Result.MACAddress ?? MACAddress.None,
+                MACAddress = macAddr,
                 Settings = bulbCommand.Result
             };
 
-            // Update cache and existing bulb if found
-            lock (_cacheLock)
-            {
-                var macAddr = bulbCommand.Result.MACAddress ?? MACAddress.None;
-                if (BulbCache.ContainsKey(macAddr))
-                {
-                    var cachedBulb = BulbCache[macAddr];
-                    bulbCommand.Result.CopyTo(cachedBulb.Settings);
-                    cachedBulb.IPAddress = sourceAddress;
-                    cachedBulb.Port = DefaultPort;
-                    cachedBulb.UpdateLastSeen();
-                    return cachedBulb;
-                }
-                else
-                {
-                    BulbCache[macAddr] = bulb;
-                }
-            }
-
+            bulbCache.Set(macAddr, bulb);
             return bulb;
         }
 

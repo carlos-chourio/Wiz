@@ -10,7 +10,6 @@ using Newtonsoft.Json;
 
 using WiZ.NET.Models;
 using WiZ.Observable;
-using WiZ.NET.Services;
 
 namespace WiZ.NET.Profiles
 {
@@ -63,38 +62,24 @@ namespace WiZ.NET.Profiles
             return l;
         }
 
-        public async Task<BulbModel> GetBulbModel()
+        /// <summary>
+        /// Gets a BulbModel from this BulbItem.
+        /// Creates a new BulbModel with the information from this item.
+        /// </summary>
+        /// <returns>A BulbModel instance.</returns>
+        public Task<BulbModel> GetBulbModel()
         {
-            BulbModel b;
-
-            lock (BulbService.BulbCache)
-            {
-                if (BulbService.BulbCache.ContainsKey(MACAddress))
-                {
-                    b = BulbService.BulbCache[MACAddress];
-
-                    b.Name = Name;
-                    b.Icon = Icon;
-                    b.Settings.HomeId = HomeId;
-                    b.Settings.RoomId = RoomId;
-
-                    return b;
-                }
-            }
-
-            // Since we are moving away from Bulb.GetBulbByMacAddress, 
-            // and we want to use BulbService, we just create a new model if not in cache.
-            // In a real scenario, we might want to trigger a discovery or a specific GetPilot.
-            b = new BulbModel(IPAddress, Port)
+            // Create a new BulbModel from this item's data
+            var bulb = new BulbModel(IPAddress, Port)
             {
                 MACAddress = MACAddress,
                 Name = Name,
                 Icon = Icon
             };
-            b.Settings.HomeId = HomeId;
-            b.Settings.RoomId = RoomId;
+            bulb.Settings.HomeId = HomeId;
+            bulb.Settings.RoomId = RoomId;
 
-            return b;
+            return Task.FromResult(bulb);
         }
 
 

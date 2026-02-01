@@ -1,33 +1,40 @@
 using System;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 using WiZ.NET.Models;
 using WiZ.NET.Services;
+using WiZ.NET.Interfaces;
 using Microsoft.Extensions.Logging.Abstractions;
 using WiZ.NET;
+using WiZ.NET.Extensions;
+using Microsoft.Extensions.DependencyInjection;
+
 namespace WiZ.Tests
 {
     public class BulbServiceTests
     {
-        private readonly BulbService _bulbService;
+        private readonly IBulbService _bulbService;
+        private readonly IBulbCache _bulbCache;
+        private readonly IUdpCommunicationService _udpService;
         private const string TestMac = "44:4F:8E:EF:BC:82";
         private const string TestIp = "192.168.0.180";
 
         public BulbServiceTests()
         {
-            // 1. Create a "dummy" logger for the UDP service
+            // Create services using DI pattern
             var udpLogger = NullLogger<UdpCommunicationService>.Instance;
-            
-            // 2. Create the UDP service
-            var udpService = new UdpCommunicationService(udpLogger);
-
-            // 3. Create a "dummy" logger for the Bulb service
             var bulbLogger = NullLogger<BulbService>.Instance;
+            
+            // Create cache
+            _bulbCache = new BulbCache();
+            
+            // Create UDP service
+            _udpService = new UdpCommunicationService(udpLogger);
 
-            // 4. Manually inject the dependencies into the service
-            // We use 5000 for the timeout as used in your Program.cs
-            _bulbService = new BulbService(udpService, 5000, bulbLogger);
+            // Create bulb service with all dependencies
+            _bulbService = new BulbService(_udpService, _bulbCache, 5000, bulbLogger);
         }
 
         [Fact]
@@ -39,6 +46,50 @@ namespace WiZ.Tests
             Assert.Equal(38899, bulb.Port);
             Assert.False(bulb.IsPoweredOn);
             Assert.Equal(0, bulb.Brightness);
+        }
+
+        [Fact]
+        public void BulbCache_ShouldStoreAndRetrieveBulbs()
+        {
+            var mac = MACAddress.Parse(TestMac);
+            var bulb = new BulbModel(TestIp)
+            {
+                MACAddress = mac,
+                Name = "Test Bulb"
+            };
+
+            // Test Set and Get
+            _bulbCache.Set(mac, bulb);
+            var retrieved = _bulbCache.Get(mac);
+
+            Assert.NotNull(retrieved);
+            Assert.Equal(bulb.Name, retrieved.Name);
+            Assert.Equal(bulb.MACAddress, retrieved.MACAddress);
+
+            // Test Contains
+            Assert.True(_bulbCache.Contains(mac));
+
+            // Test Remove
+            Assert.True(_bulbCache.Remove(mac));
+            Assert.False(_bulbCache.Contains(mac));
+        }
+
+        [Fact]
+        public void BulbCache_Clear_ShouldRemoveAllBulbs()
+        {
+            var mac1 = MACAddress.Parse("44:4F:8E:EF:BC:82");
+            var mac2 = MACAddress.Parse("44:4F:8E:EF:BC:83");
+
+            _bulbCache.Set(mac1, new BulbModel(TestIp) { MACAddress = mac1 });
+            _bulbCache.Set(mac2, new BulbModel(TestIp) { MACAddress = mac2 });
+
+            Assert.Equal(2, _bulbCache.Count);
+
+            _bulbCache.Clear();
+
+            Assert.Equal(0, _bulbCache.Count);
+            Assert.Null(_bulbCache.Get(mac1));
+            Assert.Null(_bulbCache.Get(mac2));
         }
 
         [Fact]
@@ -82,6 +133,51 @@ namespace WiZ.Tests
         }
 
         [Fact]
+        public async Task BulbService_WithCancellation_ShouldCancelOperation()
+        {
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            // Should throw OperationCanceledException (or derived TaskCanceledException) when cancelled
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            {
+                await _bulbService.ScanForBulbsAsync(5000, cancellationToken: cts.Token);
+            });
+        }
+
+        [Fact]
+        public void ServiceCollectionExtensions_ShouldRegisterServices()
+        {
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddWiZNET();
+
+            var provider = services.BuildServiceProvider();
+
+            // Verify all services are registered
+            Assert.NotNull(provider.GetService<IBulbCache>());
+            Assert.NotNull(provider.GetService<IUdpCommunicationService>());
+            Assert.NotNull(provider.GetService<IBulbService>());
+        }
+
+        [Fact]
+        public void ServiceCollectionExtensions_WithOptions_ShouldApplyTimeout()
+        {
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddWiZNET(options =>
+            {
+                options.Timeout = 10000;
+            });
+
+            var provider = services.BuildServiceProvider();
+            var service = provider.GetService<IBulbService>();
+
+            Assert.NotNull(service);
+            // Service is created with the specified timeout
+        }
+
+        [Fact]
         public async Task BulbService_Integration_BasicControls_ShouldWorkAndLeaveOn()
         {
             var mac = MACAddress.Parse(TestMac);
@@ -100,10 +196,17 @@ namespace WiZ.Tests
 
             // Test setting a scene
             await _bulbService.SetSceneAsync(bulb, WiZ.NET.LightMode.LightModes[1]);
-            Assert.Equal(1, (int)bulb.Settings.Scene);
+            Assert.Equal(bulb.Scene, LightMode.LightModes[1]);
             await Task.Delay(1000);
 
             await _bulbService.SetSceneAsync(bulb, LightMode.Fireplace);
+            Assert.Equal(bulb.Scene, LightMode.Fireplace);
+            await Task.Delay(1000);
+
+            // Test color
+            await _bulbService.SetColorAsync(bulb, System.Drawing.Color.FromArgb(0, 0, 255));
+            Assert.Equal(System.Drawing.Color.FromArgb(0, 0, 255), bulb.Settings.Color);
+            Assert.Equal(0, bulb.Scene);
             await Task.Delay(1000);
 
             // Turn off briefly

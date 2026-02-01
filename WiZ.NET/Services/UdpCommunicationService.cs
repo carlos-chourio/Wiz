@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using WiZ.NET.Helpers;
+using WiZ.NET.Interfaces;
 
 namespace WiZ.NET.Services
 {
@@ -15,7 +16,7 @@ namespace WiZ.NET.Services
     /// Singleton UDP communication service for WiZ bulb communication.
     /// Provides thread-safe, managed UDP communication to prevent port binding conflicts.
     /// </summary>
-    public class UdpCommunicationService : IDisposable
+    public class UdpCommunicationService : IUdpCommunicationService
     {
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<Guid, PendingRequest> _pendingRequests = new();
@@ -26,19 +27,21 @@ namespace WiZ.NET.Services
         private bool _disposed = false;
         private IPAddress _boundLocalAddress;
         private Task _listeningTask;
+        private CancellationTokenSource _listeningCts;
+
+        // Simple retry configuration
+        private const int DefaultRetryCount = 3;
+        private static readonly TimeSpan[] RetryDelays = { TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(800) };
 
         public UdpCommunicationService(ILogger<UdpCommunicationService> logger)
         {
-            this.logger = logger;
+            this.logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        /// <summary>
-        /// Initializes the UDP service with the specified local address.
-        /// </summary>
-        /// <param name="localAddress">Local IP address to bind to.</param>
-        public async Task InitializeAsync(IPAddress localAddress = null)
+        /// <inheritdoc />
+        public async Task InitializeAsync(IPAddress localAddress = null, CancellationToken cancellationToken = default)
         {
-            await _semaphore.WaitAsync();
+            await _semaphore.WaitAsync(cancellationToken);
             try
             {
                 if (_isInitialized) return;
@@ -61,8 +64,12 @@ namespace WiZ.NET.Services
                 _boundLocalAddress = localAddress;
 
                 // Start listening for responses
-                _listeningTask = StartListeningAsync();
+                _listeningCts = new CancellationTokenSource();
+                _listeningTask = StartListeningAsync(_listeningCts.Token);
                 _isInitialized = true;
+
+                logger.LogInformation("UDP Communication Service initialized on {LocalAddress}:{Port}", 
+                    localAddress, BulbService.DefaultPort);
             }
             finally
             {
@@ -70,34 +77,85 @@ namespace WiZ.NET.Services
             }
         }
 
-        /// <summary>
-        /// Sends a command to a bulb and waits for response.
-        /// </summary>
-        /// <param name="command">JSON command to send.</param>
-        /// <param name="targetAddress">IP address of target bulb.</param>
-        /// <param name="targetPort">Port of target bulb (default: 38899).</param>
-        /// <param name="timeout">Timeout in milliseconds.</param>
-        /// <returns>Response from the bulb.</returns>
+        /// <inheritdoc />
         public async Task<string> SendCommandAsync(
             string command, 
             IPAddress targetAddress, 
             int targetPort = BulbService.DefaultPort, 
-            int timeout = 2000)
+            int timeout = 2000,
+            CancellationToken cancellationToken = default)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(UdpCommunicationService));
 
-            if (!_isInitialized)
-                await InitializeAsync();
+            if (targetAddress == null)
+                throw new ArgumentNullException(nameof(targetAddress));
 
-            await _semaphore.WaitAsync();
+            if (!_isInitialized)
+                await InitializeAsync(cancellationToken: cancellationToken);
+
+            // Simple retry loop
+            Exception lastException = null;
+            for (int attempt = 0; attempt <= DefaultRetryCount; attempt++)
+            {
+                try
+                {
+                    var result = await DoSendCommandAsync(command, targetAddress, targetPort, timeout, cancellationToken);
+                    
+                    // If we got a result (not null or empty), return it
+                    if (!string.IsNullOrEmpty(result))
+                    {
+                        if (attempt > 0)
+                        {
+                            logger.LogInformation("Command succeeded after {Attempt} retry(s)", attempt);
+                        }
+                        return result;
+                    }
+
+                    // Empty result - will retry
+                    logger.LogWarning("Empty response received, attempt {Attempt} of {MaxAttempts}", 
+                        attempt + 1, DefaultRetryCount + 1);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is SocketException or TaskCanceledException or TimeoutException)
+                {
+                    lastException = ex;
+                    logger.LogWarning(ex, "Send command failed on attempt {Attempt} of {MaxAttempts}", 
+                        attempt + 1, DefaultRetryCount + 1);
+                }
+
+                // Wait before retry (if not the last attempt)
+                if (attempt < DefaultRetryCount)
+                {
+                    var delay = RetryDelays[Math.Min(attempt, RetryDelays.Length - 1)];
+                    logger.LogDebug("Waiting {Delay}ms before retry...", delay.TotalMilliseconds);
+                    await Task.Delay(delay, cancellationToken);
+                }
+            }
+
+            // All retries exhausted
+            logger.LogError(lastException, "Command failed after {RetryCount} retries", DefaultRetryCount);
+            throw new InvalidOperationException($"Failed to send command after {DefaultRetryCount} retries", lastException);
+        }
+
+        private async Task<string> DoSendCommandAsync(
+            string command, 
+            IPAddress targetAddress, 
+            int targetPort, 
+            int timeout,
+            CancellationToken cancellationToken)
+        {
+            await _semaphore.WaitAsync(cancellationToken);
             try
             {
                 var requestId = Guid.NewGuid();
                 var commandBytes = Encoding.UTF8.GetBytes(command);
                 
                 // Create pending request
-                var tcs = new TaskCompletionSource<string>();
+                var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var pendingRequest = new PendingRequest
                 {
                     RequestId = requestId,
@@ -108,20 +166,37 @@ namespace WiZ.NET.Services
                 
                 _pendingRequests[requestId] = pendingRequest;
 
-                // Send the command
-                _udpClient.Send(commandBytes, commandBytes.Length, targetAddress.ToString(), targetPort);
-                
-                logger.LogOutput(command, _boundLocalAddress, targetAddress);
+                using (logger.BeginScope(new Dictionary<string, object>
+                {
+                    ["RequestId"] = requestId,
+                    ["TargetAddress"] = targetAddress,
+                    ["TargetPort"] = targetPort
+                }))
+                {
+                    logger.LogDebug("Sending command to {TargetAddress}:{TargetPort}", targetAddress, targetPort);
+
+                    // Send the command
+                    await _udpClient.SendAsync(commandBytes, commandBytes.Length, targetAddress.ToString(), targetPort);
+                    
+                    logger.LogOutput(command, _boundLocalAddress, targetAddress);
+                }
 
                 // Wait for response with timeout
                 using var timeoutCts = new CancellationTokenSource(timeout);
-                using var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
                 
-                combinedCts.Token.Register(() => 
+                linkedCts.Token.Register(() => 
                 {
                     if (_pendingRequests.TryRemove(requestId, out _))
                     {
-                        tcs.TrySetCanceled();
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            tcs.TrySetCanceled(cancellationToken);
+                        }
+                        else
+                        {
+                            tcs.TrySetCanceled();
+                        }
                     }
                 });
 
@@ -133,52 +208,67 @@ namespace WiZ.NET.Services
             }
         }
 
-        /// <summary>
-        /// Broadcasts a command for bulb discovery.
-        /// </summary>
-        /// <param name="command">Command to broadcast.</param>
-        /// <param name="callback">Callback for each response.</param>
-        /// <param name="timeout">Discovery timeout.</param>
-        /// <returns>List of discovered bulbs.</returns>
+        /// <inheritdoc />
         public async Task BroadcastCommandAsync(
             string command,
             Action<DiscoveryResponse> callback,
-            int timeout = 5000)
+            int timeout = 5000,
+            CancellationToken cancellationToken = default)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(UdpCommunicationService));
 
-            if (!_isInitialized)
-                await InitializeAsync();
+            if (callback == null)
+                throw new ArgumentNullException(nameof(callback));
 
-            await _semaphore.WaitAsync();
+            if (!_isInitialized)
+                await InitializeAsync(cancellationToken: cancellationToken);
+
+            await _semaphore.WaitAsync(cancellationToken);
             try
             {
                 var commandBytes = Encoding.UTF8.GetBytes(command);
                 var broadcastAddress = IPAddress.Parse("255.255.255.255");
                 
                 // Register temporary discovery callback
-                _discoveryCallbacks.Add(callback);
+                lock (_discoveryCallbacks)
+                {
+                    _discoveryCallbacks.Add(callback);
+                }
                 
-                var endTime = DateTime.Now.AddMilliseconds(timeout);
+                var endTime = DateTime.UtcNow.AddMilliseconds(timeout);
                 
-                // Send initial broadcast
-                _udpClient.Send(commandBytes, commandBytes.Length, broadcastAddress.ToString(), BulbService.DefaultPort);
-                logger.LogOutput(command, _boundLocalAddress, broadcastAddress);
+                using (logger.BeginScope(new Dictionary<string, object>
+                {
+                    ["Broadcast"] = true,
+                    ["Timeout"] = timeout
+                }))
+                {
+                    logger.LogInformation("Starting broadcast discovery for {Timeout}ms", timeout);
+
+                    // Send initial broadcast
+                    await _udpClient.SendAsync(commandBytes, commandBytes.Length, broadcastAddress.ToString(), BulbService.DefaultPort);
+                    logger.LogOutput(command, _boundLocalAddress, broadcastAddress);
+                }
 
                 // Continue broadcasting periodically and collecting responses
-                while (DateTime.Now < endTime)
+                while (DateTime.UtcNow < endTime)
                 {
-                    await Task.Delay(500); // Broadcast every 500ms
+                    await Task.Delay(500, cancellationToken); // Broadcast every 500ms
                     
-                    if (DateTime.Now < endTime)
+                    if (DateTime.UtcNow < endTime)
                     {
-                        _udpClient.Send(commandBytes, commandBytes.Length, broadcastAddress.ToString(), BulbService.DefaultPort);
+                        await _udpClient.SendAsync(commandBytes, commandBytes.Length, broadcastAddress.ToString(), BulbService.DefaultPort);
                     }
                 }
 
                 // Remove the callback after timeout
-                _discoveryCallbacks.Remove(callback);
+                lock (_discoveryCallbacks)
+                {
+                    _discoveryCallbacks.Remove(callback);
+                }
+
+                logger.LogInformation("Broadcast discovery completed");
             }
             finally
             {
@@ -189,19 +279,18 @@ namespace WiZ.NET.Services
         /// <summary>
         /// Listens for incoming UDP responses.
         /// </summary>
-        private async Task StartListeningAsync()
+        private async Task StartListeningAsync(CancellationToken cancellationToken)
         {
+            logger.LogDebug("UDP listening task started");
+
             try
             {
-                while (!_disposed)
+                while (!cancellationToken.IsCancellationRequested && !_disposed)
                 {
-                    var receiveTask = _udpClient.ReceiveAsync();
-                    
-                    await receiveTask;
-                    
-                    if (receiveTask.IsCompleted)
+                    try
                     {
-                        var result = receiveTask.Result;
+                        var result = await _udpClient.ReceiveAsync();
+                        
                         var response = Encoding.UTF8.GetString(result.Buffer).Trim('\x0');
                         
                         logger.LogInput(response, _boundLocalAddress, result.RemoteEndPoint.Address);
@@ -218,16 +307,34 @@ namespace WiZ.NET.Services
                             HandleDiscoveryResponse(response, result.RemoteEndPoint.Address);
                         }
                     }
+                    catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
+                    {
+                        // Timeout is expected, continue listening
+                        logger.LogDebug("UDP receive timeout, continuing to listen");
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Expected during cancellation
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Error in UDP listening loop");
+                        // Continue listening despite errors
+                    }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogDebug("UDP listening task cancelled");
             }
             catch (ObjectDisposedException)
             {
-                // Expected during disposal
+                logger.LogDebug("UDP client disposed, listening task ending");
             }
-            catch
+            catch (Exception ex)
             {
-                // Log error but don't throw to prevent listening task from crashing
-                // ConsoleHelper.LogError($"UDP listening error: {ex.Message}");
+                logger.LogError(ex, "Fatal error in UDP listening task");
             }
         }
 
@@ -260,15 +367,21 @@ namespace WiZ.NET.Services
             };
 
             // Notify all registered discovery callbacks
-            foreach (var callback in _discoveryCallbacks.ToArray())
+            List<Action<DiscoveryResponse>> callbacks;
+            lock (_discoveryCallbacks)
+            {
+                callbacks = new List<Action<DiscoveryResponse>>(_discoveryCallbacks);
+            }
+
+            foreach (var callback in callbacks)
             {
                 try
                 {
                     callback?.Invoke(discoveryResponse);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Don't let one bad callback break the others
+                    logger.LogWarning(ex, "Error in discovery callback");
                 }
             }
         }
@@ -282,6 +395,11 @@ namespace WiZ.NET.Services
 
             _disposed = true;
             
+            logger.LogDebug("Disposing UDP Communication Service");
+
+            // Cancel listening task
+            _listeningCts?.Cancel();
+
             // Cancel all pending requests
             foreach (var request in _pendingRequests.Values)
             {
@@ -290,12 +408,21 @@ namespace WiZ.NET.Services
             _pendingRequests.Clear();
 
             // Close UDP client
-            _listeningTask?.ContinueWith(_ => { });
-            _udpClient?.Close();
-            _udpClient?.Dispose();
+            try
+            {
+                _udpClient?.Close();
+                _udpClient?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Error disposing UDP client");
+            }
             _udpClient = null;
 
+            _listeningCts?.Dispose();
             _semaphore?.Dispose();
+
+            logger.LogInformation("UDP Communication Service disposed");
         }
 
         private class PendingRequest
@@ -304,13 +431,6 @@ namespace WiZ.NET.Services
             public TaskCompletionSource<string> TaskCompletionSource { get; set; }
             public IPAddress TargetAddress { get; set; }
             public int Timeout { get; set; }
-        }
-
-        public class DiscoveryResponse
-        {
-            public string Response { get; set; }
-            public IPAddress SourceAddress { get; set; }
-            public DateTime Timestamp { get; set; }
         }
     }
 }
