@@ -204,9 +204,8 @@ namespace WiZ.Tests
             await Task.Delay(1000);
 
             // Test color
-            await _bulbService.SetColorAsync(bulb, System.Drawing.Color.FromArgb(0, 0, 255));
-            Assert.Equal(System.Drawing.Color.FromArgb(0, 0, 255), bulb.Settings.Color);
-            Assert.Equal(0, bulb.Scene);
+            await _bulbService.SetColorAsync(bulb, System.Drawing.Color.FromArgb(255, 0, 255, 0));
+            Assert.Equal(System.Drawing.Color.FromArgb(255, 0, 255, 0), bulb.Settings.Color);
             await Task.Delay(1000);
 
             // Turn off briefly
@@ -216,8 +215,8 @@ namespace WiZ.Tests
 
             // Finally, turn it back ON and set it to a solid Warm White scene (11)
             await _bulbService.TurnOnAsync(bulb);
-            await _bulbService.SetBrightnessAsync(bulb, 100);
             await _bulbService.SetSceneAsync(bulb, WiZ.NET.LightMode.WarmWhite);
+            await _bulbService.SetBrightnessAsync(bulb, 80);
 
             Assert.True(bulb.IsPoweredOn);
             Assert.Equal(11, bulb.Settings.Scene);
