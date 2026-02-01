@@ -371,6 +371,7 @@ namespace WiZ.NET.Services
             logger.LogInformation("Setting color to RGB({R},{G},{B}) for bulb {MacAddress}", 
                 color.R, color.G, color.B, bulb.MACAddress);
 
+            bulb.Settings.Scene = null;
             bulb.Settings.Color = color;
             return await SetPilotAsync(bulb, cancellationToken);
         }
